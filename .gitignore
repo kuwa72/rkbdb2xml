@@ -39,5 +39,6 @@ ENV/
 
 # Project specific
 *.db
+!tests/data/rekordbox_test.db
 *.xml
 !rkb_sample.xml
