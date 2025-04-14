@@ -256,17 +256,32 @@ class RekordboxXMLExporter:
     def _add_tracks_to_collection(self, xml, progress, verbose: bool) -> None:
         """Add all tracks to the XML collection."""
         # In PyRekordbox 0.4.0+ the method to get tracks is search_content()
-        if hasattr(self.db, 'search_content'):
-            # search_content now requires a text parameter, use empty string to get all tracks
-            tracks = self.db.search_content("")
-        elif hasattr(self.db, 'get_content'):
-            tracks = self.db.get_content()
-        elif hasattr(self.db, 'get_tracks'):
-            tracks = self.db.get_tracks()
-        else:
-            tracks = []
+        tracks = []
+        try:
+            if hasattr(self.db, 'search_content'):
+                # search_content now requires a text parameter, use empty string to get all tracks
+                tracks = self.db.search_content("")
+            elif hasattr(self.db, 'get_content'):
+                tracks = self.db.get_content()
+            elif hasattr(self.db, 'get_tracks'):
+                tracks = self.db.get_tracks()
+            else:
+                if self.console:
+                    self.console.log("[yellow]Warning: Unable to find method to get tracks[/yellow]")
+            
+            # Ensure tracks is a list
+            if tracks is None:
+                tracks = []
+            
+            # Try alternative methods if no tracks were found
+            if len(tracks) == 0 and hasattr(self.db, 'get_all_content'):
+                tracks = self.db.get_all_content()
+            
+            if len(tracks) == 0 and hasattr(self.db, 'get_all_tracks'):
+                tracks = self.db.get_all_tracks()
+        except Exception as e:
             if self.console:
-                self.console.log("[yellow]Warning: Unable to find method to get tracks[/yellow]")
+                self.console.log(f"[yellow]Warning: Error getting tracks: {str(e)}[/yellow]")
         
         if verbose:
             self.console.log(f"Found {len(tracks)} tracks in database")
@@ -276,13 +291,25 @@ class RekordboxXMLExporter:
         if verbose:
             track_task = progress.add_task("Processing tracks...", total=len(tracks))
         
+        # Keep track of successfully added tracks
+        added_tracks = 0
+        failed_tracks = 0
+        
         # Add each track to the collection
         for track in tracks:
-            self._add_track_to_xml(xml, track)
+            success = self._add_track_to_xml(xml, track)
+            if success:
+                added_tracks += 1
+            else:
+                failed_tracks += 1
+            
             if track_task:
                 progress.update(track_task, advance=1)
+        
+        if verbose:
+            self.console.log(f"Added {added_tracks} tracks to XML, {failed_tracks} tracks failed")
     
-    def _add_track_to_xml(self, xml, track) -> None:
+    def _add_track_to_xml(self, xml, track) -> bool:
         """
         Add a track to the XML collection.
         
@@ -319,14 +346,39 @@ class RekordboxXMLExporter:
         except Exception as attr_error:
             # Fallback to dictionary access if attribute access fails
             try:
-                track_id = str(track.get('ID', ''))
-                location = track.get('Location', '')
+                # Try to get track_id and location using attribute access first
+                if hasattr(track, 'ID'):
+                    track_id = str(getattr(track, 'ID', ''))
+                else:
+                    # Try dictionary-like access if possible
+                    if hasattr(track, '__getitem__') and 'ID' in track:
+                        track_id = str(track['ID'])
+                    else:
+                        track_id = ''
+                
+                if hasattr(track, 'Location'):
+                    location = getattr(track, 'Location', '')
+                else:
+                    # Try dictionary-like access if possible
+                    if hasattr(track, '__getitem__') and 'Location' in track:
+                        location = track['Location']
+                    else:
+                        location = ''
                 
                 # Prepare track attributes
                 track_attrs = {}
                 for db_field, xml_attr in self._track_attribute_mapping().items():
-                    if db_field in track and track[db_field] is not None:
-                        value = str(track[db_field])
+                    value = None
+                    
+                    # Try attribute access first
+                    if hasattr(track, db_field):
+                        value = getattr(track, db_field)
+                    # Then try dictionary-like access
+                    elif hasattr(track, '__getitem__') and db_field in track:
+                        value = track[db_field]
+                    
+                    if value is not None:
+                        value = str(value)
                         # Handle special case for file location
                         if db_field == 'Location':
                             value = self._format_file_location(value)
@@ -335,20 +387,132 @@ class RekordboxXMLExporter:
             except Exception as dict_error:
                 if self.console:
                     self.console.log(f"[yellow]Warning: Could not process track: {str(dict_error)}[/yellow]")
-                return
-        
-        # Add track to XML
+                return False
+                # Add track to XML
         try:
             # Use pyrekordbox.rbxml's add_track method
-            xml_track = xml.add_track(location, **track_attrs)
+            track_id = track_attrs.get('TrackID', '')
             
-            # Add tempo markers and position markers if available
-            # Note: In the future, we can modify this to use pyrekordbox.rbxml's API
-            # for adding tempo and position markers if it becomes available
-            pass
+            # Make sure all required attributes are present
+            # Add missing attributes with default values if they're not in track_attrs
+            for attr in ['Album', 'Artist', 'Composer', 'Genre', 'Grouping', 'Label', 'Mix', 'Remixer', 'Tonality']:
+                if attr not in track_attrs:
+                    track_attrs[attr] = ''
+            
+            # Ensure location is not empty to avoid duplicate track errors
+            if not location or location == 'file://localhost/':
+                # Generate a unique location based on track ID if the actual location is empty
+                location = f"file://localhost/unknown_location_{track_id}.mp3"
+            
+            # Remove Location from track_attrs if it exists, since we'll pass it as a separate parameter
+            if 'Location' in track_attrs:
+                del track_attrs['Location']
+            
+            # Add track to XML
+            try:
+                xml_track = xml.add_track(location, **track_attrs)
+            except Exception as add_error:
+                # If adding the track fails due to duplicate location, try with a modified location
+                if "already contains a track with Location" in str(add_error):
+                    # Modify the location to make it unique
+                    unique_location = f"{location}?id={track_id}"
+                    try:
+                        xml_track = xml.add_track(unique_location, **track_attrs)
+                    except Exception as retry_error:
+                        if self.console:
+                            self.console.log(f"[yellow]Warning: Could not add track {track_id} even with unique location: {str(retry_error)}[/yellow]")
+                        return False
+                else:
+                    if self.console:
+                        self.console.log(f"[yellow]Warning: Could not add track {track_id}: {str(add_error)}[/yellow]")
+                    return False
+            
+            # Get the raw XML document to add markers directly
+            # This is a workaround since we can't access the XML elements directly through the API
+            try:
+                # Try to access the XML document
+                xml_doc = None
+                
+                # Try different ways to access the XML document
+                if hasattr(xml, 'to_xml_string'):
+                    # Save to a temporary file and parse it back
+                    import tempfile
+                    with tempfile.NamedTemporaryFile(suffix='.xml', delete=False) as temp_file:
+                        temp_path = temp_file.name
+                    
+                    # Save current state to temp file
+                    xml.save(temp_path)
+                    
+                    # Parse the XML file
+                    xml_doc = etree.parse(temp_path)
+                    
+                    # Find the track element by ID
+                    track_elem = None
+                    for elem in xml_doc.findall('.//TRACK'):
+                        if elem.get('TrackID') == track_id:
+                            track_elem = elem
+                            break
+                    
+                    if track_elem is not None:
+                        # Add BPM information as TEMPO marker
+                        bpm = None
+                        if hasattr(track, 'BPM'):
+                            bpm = getattr(track, 'BPM')
+                        elif 'BPM' in track_attrs:
+                            bpm = track_attrs['BPM']
+                        elif 'AverageBpm' in track_attrs:
+                            bpm = track_attrs['AverageBpm']
+                        
+                        if bpm and float(bpm) > 0:
+                            # Create a TEMPO element
+                            tempo_elem = etree.SubElement(track_elem, "TEMPO")
+                            tempo_elem.set("Inizio", "0.025")  # Standard start position
+                            tempo_elem.set("Bpm", f"{float(bpm):.2f}")
+                            tempo_elem.set("Metro", "4/4")  # Default time signature
+                            tempo_elem.set("Battito", "1")  # Default beat
+                        
+                        # Add cue points as POSITION_MARK elements
+                        if hasattr(track, 'Cues') and getattr(track, 'Cues'):
+                            cues = getattr(track, 'Cues')
+                            for i, cue in enumerate(cues):
+                                # Create a POSITION_MARK element
+                                pos_elem = etree.SubElement(track_elem, "POSITION_MARK")
+                                pos_elem.set("Name", getattr(cue, 'Name', f"Cue {i+1}"))
+                                pos_elem.set("Type", str(getattr(cue, 'Type', "0")))
+                                pos_elem.set("Start", str(getattr(cue, 'Position', "0.0")))
+                                pos_elem.set("Num", str(i))
+                                # Add color if available
+                                if hasattr(cue, 'Color'):
+                                    pos_elem.set("Red", str(getattr(cue, 'Color', {}).get('Red', "0")))
+                                    pos_elem.set("Green", str(getattr(cue, 'Color', {}).get('Green', "0")))
+                                    pos_elem.set("Blue", str(getattr(cue, 'Color', {}).get('Blue', "0")))
+                    
+                    # Save the modified XML back
+                    xml_doc.write(temp_path)
+                    
+                    # Load the modified XML back into the pyrekordbox object
+                    # This is a hack, but it's the only way to modify the XML directly
+                    xml = pyrekordbox.rbxml.RekordboxXml.parse_file(temp_path)
+                    
+                    # Clean up the temporary file
+                    import os
+                    os.unlink(temp_path)
+            except Exception as xml_error:
+                if self.console:
+                    self.console.log(f"[yellow]Warning: Could not add markers for track {track_id}: {str(xml_error)}[/yellow]")
+            except Exception as marker_error:
+                # Don't fail the whole track if we can't add markers
+                if self.console:
+                    self.console.log(f"[yellow]Warning: Could not add markers for track {track_id}: {str(marker_error)}[/yellow]")
+                # Continue with the track even if markers failed
+                pass
+            
+            # Track was successfully added
+            return True
         except Exception as e:
             if self.console:
                 self.console.log(f"[yellow]Warning: Could not add track {track_id}: {str(e)}[/yellow]")
+            return False
     
     def _track_attribute_mapping(self) -> Dict[str, str]:
         """
@@ -363,27 +527,45 @@ class RekordboxXMLExporter:
             'ID': 'TrackID',
             'Title': 'Name',
             'Artist': 'Artist',
+            'ArtistName': 'Artist',  # DjmdContent attribute
             'Composer': 'Composer',
+            'ComposerName': 'Composer',  # DjmdContent attribute
             'Album': 'Album',
+            'AlbumName': 'Album',  # DjmdContent attribute
             'Grouping': 'Grouping',
             'Genre': 'Genre',
+            'GenreName': 'Genre',  # DjmdContent attribute
+            'FileType': 'Kind',  # DjmdContent attribute
             'Kind': 'Kind',
+            'FileSize': 'Size',  # DjmdContent attribute
             'Size': 'Size',
+            'Length': 'TotalTime',  # DjmdContent attribute
             'TotalTime': 'TotalTime',
+            'DiscNo': 'DiscNumber',  # DjmdContent attribute
             'DiscNumber': 'DiscNumber',
+            'TrackNo': 'TrackNumber',  # DjmdContent attribute
             'TrackNumber': 'TrackNumber',
+            'ReleaseYear': 'Year',  # DjmdContent attribute
             'Year': 'Year',
+            'BPM': 'AverageBpm',  # DjmdContent attribute
             'AverageBpm': 'AverageBpm', 
+            'DateCreated': 'DateAdded',  # DjmdContent attribute
+            'StockDate': 'DateAdded',  # DjmdContent attribute
             'DateAdded': 'DateAdded',
             'BitRate': 'BitRate',
             'SampleRate': 'SampleRate',
+            'Commnt': 'Comments',  # DjmdContent attribute
             'Comments': 'Comments',
+            'DJPlayCount': 'PlayCount',  # DjmdContent attribute
             'PlayCount': 'PlayCount',
             'Rating': 'Rating',
             'Location': 'Location',
             'Remixer': 'Remixer',
+            'RemixerName': 'Remixer',  # DjmdContent attribute
+            'KeyName': 'Tonality',  # DjmdContent attribute
             'Tonality': 'Tonality',
             'Label': 'Label',
+            'LabelName': 'Label',  # DjmdContent attribute
             'Mix': 'Mix'
         }
         
@@ -659,85 +841,154 @@ class RekordboxXMLExporter:
         regular_playlists = []
         
         # Get playlist folders
-        if hasattr(self.db, 'get_playlist_folders'):
-            try:
+        try:
+            # Try to get playlist folders using pyrekordbox 0.4.0 API
+            if hasattr(self.db, 'get_playlist_folders'):
                 playlist_folders = self.db.get_playlist_folders()
-            except Exception as e:
-                if self.console:
-                    self.console.log(f"[yellow]Warning: Failed to get playlist folders: {e}[/yellow]")
-                
-                # Try alternative methods
-                if hasattr(self.db, 'get_folders'):
-                    try:
-                        playlist_folders = self.db.get_folders()
-                    except Exception as e2:
-                        if self.console:
-                            self.console.log(f"[yellow]Warning: Failed to get folders: {e2}[/yellow]")
+            elif hasattr(self.db, 'get_folders'):
+                playlist_folders = self.db.get_folders()
+            elif hasattr(self.db, 'get_playlist'):
+                # In pyrekordbox 0.4.0, we can get all playlists and filter folders
+                all_playlists = self.db.get_playlist()
+                for playlist in all_playlists:
+                    # Check if it's a folder (Type=0)
+                    if hasattr(playlist, 'Type') and getattr(playlist, 'Type') == 0:
+                        playlist_folders.append(playlist)
+        except Exception as e:
+            if self.console:
+                self.console.log(f"[yellow]Warning: Failed to get playlist folders: {e}[/yellow]")
         
         # Get regular playlists
-        if hasattr(self.db, 'get_playlists'):
-            try:
+        try:
+            # Try to get playlists using pyrekordbox 0.4.0 API
+            if hasattr(self.db, 'get_playlists'):
                 regular_playlists = self.db.get_playlists()
+            elif hasattr(self.db, 'get_playlist'):
+                # In pyrekordbox 0.4.0, we can get all playlists and filter non-folders
+                all_playlists = self.db.get_playlist()
+                for playlist in all_playlists:
+                    # Check if it's not a folder (Type=1)
+                    if hasattr(playlist, 'Type') and getattr(playlist, 'Type') == 1:
+                        regular_playlists.append(playlist)
+        except Exception as e:
+            if self.console:
+                self.console.log(f"[yellow]Warning: Failed to get playlists: {e}[/yellow]")
+        
+        # Convert DjmdContent objects to dictionaries if needed
+        normalized_folders = []
+        for folder in playlist_folders:
+            folder_dict = {}
+            
+            # Handle both dictionary and object access
+            try:
+                # Try object attribute access first
+                if hasattr(folder, 'ID'):
+                    folder_dict['Id'] = getattr(folder, 'ID')
+                elif hasattr(folder, 'Id'):
+                    folder_dict['Id'] = getattr(folder, 'Id')
+                
+                if hasattr(folder, 'ParentID'):
+                    folder_dict['ParentId'] = getattr(folder, 'ParentID')
+                elif hasattr(folder, 'ParentId'):
+                    folder_dict['ParentId'] = getattr(folder, 'ParentId')
+                
+                if hasattr(folder, 'Name'):
+                    folder_dict['Name'] = getattr(folder, 'Name')
+                
+                # If we couldn't get the required fields, try dictionary access
+                if 'Id' not in folder_dict:
+                    # Try dictionary access for various field names
+                    for id_field in ['Id', 'id', 'ID', 'folder_id']:
+                        if hasattr(folder, '__getitem__') and id_field in folder:
+                            folder_dict['Id'] = folder[id_field]
+                            break
+                
+                if 'ParentId' not in folder_dict:
+                    for parent_field in ['ParentId', 'parent_id', 'parentId', 'parent']:
+                        if hasattr(folder, '__getitem__') and parent_field in folder:
+                            folder_dict['ParentId'] = folder[parent_field]
+                            break
+                
+                if 'Name' not in folder_dict:
+                    if hasattr(folder, '__getitem__') and 'Name' in folder:
+                        folder_dict['Name'] = folder['Name']
+                    elif hasattr(folder, '__getitem__') and 'name' in folder:
+                        folder_dict['Name'] = folder['name']
+                
+                # Default values if still missing
+                if 'Id' not in folder_dict:
+                    continue  # Skip folders without ID
+                
+                if 'ParentId' not in folder_dict:
+                    folder_dict['ParentId'] = 0
+                
+                if 'Name' not in folder_dict:
+                    folder_dict['Name'] = 'Unnamed Folder'
+                
+                normalized_folders.append(folder_dict)
             except Exception as e:
                 if self.console:
-                    self.console.log(f"[yellow]Warning: Failed to get playlists: {e}[/yellow]")
+                    self.console.log(f"[yellow]Warning: Could not process folder: {str(e)}[/yellow]")
         
-        # Handle different API formats for playlists and folders
-        # Normalize field names
-        for folder in playlist_folders:
-            # Ensure ID is available as 'Id'
-            if 'Id' not in folder and 'id' in folder:
-                folder['Id'] = folder['id']
-            elif 'Id' not in folder and 'ID' in folder:
-                folder['Id'] = folder['ID']
-            elif 'Id' not in folder and 'folder_id' in folder:
-                folder['Id'] = folder['folder_id']
-                
-            # Ensure Parent ID is available as 'ParentId'
-            if 'ParentId' not in folder and 'parent_id' in folder:
-                folder['ParentId'] = folder['parent_id']
-            elif 'ParentId' not in folder and 'parentId' in folder:
-                folder['ParentId'] = folder['parentId']
-            elif 'ParentId' not in folder and 'parent' in folder:
-                folder['ParentId'] = folder['parent']
-            
-            # Ensure Name is available
-            if 'Name' not in folder and 'name' in folder:
-                folder['Name'] = folder['name']
-                
-            # Default ParentId to 0 if missing
-            if 'ParentId' not in folder:
-                folder['ParentId'] = 0
-        
-        # Normalize playlist fields
+        # Normalize playlist objects
+        normalized_playlists = []
         for playlist in regular_playlists:
-            # Ensure ID is available as 'Id'
-            if 'Id' not in playlist and 'id' in playlist:
-                playlist['Id'] = playlist['id']
-            elif 'Id' not in playlist and 'ID' in playlist:
-                playlist['Id'] = playlist['ID']
-            elif 'Id' not in playlist and 'playlist_id' in playlist:
-                playlist['Id'] = playlist['playlist_id']
+            playlist_dict = {}
+            
+            # Handle both dictionary and object access
+            try:
+                # Try object attribute access first
+                if hasattr(playlist, 'ID'):
+                    playlist_dict['Id'] = getattr(playlist, 'ID')
+                elif hasattr(playlist, 'Id'):
+                    playlist_dict['Id'] = getattr(playlist, 'Id')
                 
-            # Ensure Parent ID is available as 'ParentId'
-            if 'ParentId' not in playlist and 'parent_id' in playlist:
-                playlist['ParentId'] = playlist['parent_id']
-            elif 'ParentId' not in playlist and 'parentId' in playlist:
-                playlist['ParentId'] = playlist['parentId']
-            elif 'ParentId' not in playlist and 'parent' in playlist:
-                playlist['ParentId'] = playlist['parent']
+                if hasattr(playlist, 'ParentID'):
+                    playlist_dict['ParentId'] = getattr(playlist, 'ParentID')
+                elif hasattr(playlist, 'ParentId'):
+                    playlist_dict['ParentId'] = getattr(playlist, 'ParentId')
                 
-            # Ensure Name is available
-            if 'Name' not in playlist and 'name' in playlist:
-                playlist['Name'] = playlist['name']
+                if hasattr(playlist, 'Name'):
+                    playlist_dict['Name'] = getattr(playlist, 'Name')
                 
-            # Default ParentId to 0 if missing
-            if 'ParentId' not in playlist:
-                playlist['ParentId'] = 0
+                # If we couldn't get the required fields, try dictionary access
+                if 'Id' not in playlist_dict:
+                    # Try dictionary access for various field names
+                    for id_field in ['Id', 'id', 'ID', 'playlist_id']:
+                        if hasattr(playlist, '__getitem__') and id_field in playlist:
+                            playlist_dict['Id'] = playlist[id_field]
+                            break
+                
+                if 'ParentId' not in playlist_dict:
+                    for parent_field in ['ParentId', 'parent_id', 'parentId', 'parent']:
+                        if hasattr(playlist, '__getitem__') and parent_field in playlist:
+                            playlist_dict['ParentId'] = playlist[parent_field]
+                            break
+                
+                if 'Name' not in playlist_dict:
+                    if hasattr(playlist, '__getitem__') and 'Name' in playlist:
+                        playlist_dict['Name'] = playlist['Name']
+                    elif hasattr(playlist, '__getitem__') and 'name' in playlist:
+                        playlist_dict['Name'] = playlist['name']
+                
+                # Default values if still missing
+                if 'Id' not in playlist_dict:
+                    continue  # Skip playlists without ID
+                
+                if 'ParentId' not in playlist_dict:
+                    playlist_dict['ParentId'] = 0
+                
+                if 'Name' not in playlist_dict:
+                    playlist_dict['Name'] = 'Unnamed Playlist'
+                
+                normalized_playlists.append(playlist_dict)
+            except Exception as e:
+                if self.console:
+                    self.console.log(f"[yellow]Warning: Could not process playlist: {str(e)}[/yellow]")
         
         if verbose:
-            self.console.log(f"Found {len(regular_playlists)} playlists and {len(playlist_folders)} folders")
-            playlist_task = progress.add_task("Processing playlists...", total=len(regular_playlists) + len(playlist_folders))
+            self.console.log(f"Found {len(normalized_playlists)} playlists and {len(normalized_folders)} folders")
+            playlist_task = progress.add_task("Processing playlists...", total=len(normalized_playlists) + len(normalized_folders))
         else:
             playlist_task = None
         
@@ -745,7 +996,7 @@ class RekordboxXMLExporter:
         folder_map = {0: xml.root_playlist_folder}  # Map folder IDs to Node objects, 0 is ROOT
         
         # First add all folders
-        for folder in sorted(playlist_folders, key=lambda f: f.get('ParentId', 0)):
+        for folder in sorted(normalized_folders, key=lambda f: f.get('ParentId', 0)):
             try:
                 folder_id = folder.get('Id')
                 parent_id = folder.get('ParentId', 0)
@@ -768,7 +1019,7 @@ class RekordboxXMLExporter:
                     self.console.log(f"[yellow]Warning: Could not add folder {folder.get('Name')}: {str(e)}[/yellow]")
         
         # Add playlists
-        for playlist in regular_playlists:
+        for playlist in normalized_playlists:
             try:
                 playlist_id = playlist.get('Id')
                 parent_id = playlist.get('ParentId', 0)
@@ -805,26 +1056,52 @@ class RekordboxXMLExporter:
         playlist_entries = []
         
         # Try different methods to get playlist entries
-        if hasattr(self.db, 'get_playlist_entries'):
-            try:
+        try:
+            if hasattr(self.db, 'get_playlist_entries'):
                 playlist_entries = self.db.get_playlist_entries(playlist_id)
+            elif hasattr(self.db, 'get_playlist_songs'):
+                playlist_entries = self.db.get_playlist_songs(playlist_id)
+            elif hasattr(self.db, 'get_playlist_contents'):
+                playlist_entries = self.db.get_playlist_contents(playlist_id)
+        except Exception as e:
+            if self.console:
+                self.console.log(f"[yellow]Warning: Failed to get playlist entries: {e}[/yellow]")
+        
+        # Normalize playlist entries
+        normalized_entries = []
+        for entry in playlist_entries:
+            entry_dict = {}
+            
+            # Try to get track ID from object attributes first
+            try:
+                if hasattr(entry, 'ContentID'):
+                    entry_dict['TrackID'] = getattr(entry, 'ContentID')
+                elif hasattr(entry, 'ID'):
+                    entry_dict['TrackID'] = getattr(entry, 'ID')
+                elif hasattr(entry, 'TrackID'):
+                    entry_dict['TrackID'] = getattr(entry, 'TrackID')
+                
+                # If we couldn't get the required fields, try dictionary access
+                if 'TrackID' not in entry_dict:
+                    # Try dictionary access for various field names
+                    for field in ['TrackID', 'track_id', 'ID', 'id', 'ContentID', 'content_id']:
+                        if hasattr(entry, '__getitem__') and field in entry:
+                            entry_dict['TrackID'] = entry[field]
+                            break
+                
+                if 'TrackID' in entry_dict:
+                    normalized_entries.append(entry_dict)
             except Exception as e:
                 if self.console:
-                    self.console.log(f"[yellow]Warning: Failed to get playlist entries: {e}[/yellow]")
+                    self.console.log(f"[yellow]Warning: Could not process playlist entry: {str(e)}[/yellow]")
         
         # Add tracks to playlist
-        for entry in playlist_entries:
-            track_id = None
-            # Try different field names for track ID
-            for field in ['TrackID', 'track_id', 'ID', 'id', 'ContentID', 'content_id']:
-                if field in entry and entry[field] is not None:
-                    track_id = entry[field]
-                    break
-            
+        for entry in normalized_entries:
+            track_id = entry.get('TrackID')
             if track_id:
                 try:
                     # Add track to playlist using track ID
-                    playlist_node.add_track(track_id=track_id)
+                    playlist_node.add_track(track_id=str(track_id))
                 except Exception as e:
                     if self.console:
                         self.console.log(f"[yellow]Warning: Could not add track {track_id} to playlist: {str(e)}[/yellow]")
