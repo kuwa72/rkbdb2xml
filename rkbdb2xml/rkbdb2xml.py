@@ -356,11 +356,34 @@ class RekordboxXMLExporter:
                     else:
                         track_id = ''
                 
-                if hasattr(track, 'Location'):
-                    location = getattr(track, 'Location', '')
+                # Try to get folder path and file name for constructing location
+                folder_path = ''
+                file_name = ''
+                
+                # Try attribute access first
+                if hasattr(track, 'FolderPath'):
+                    folder_path = getattr(track, 'FolderPath', '')
+                elif hasattr(track, '__getitem__') and 'FolderPath' in track:
+                    folder_path = track['FolderPath']
+                    
+                if hasattr(track, 'FileNameL'):
+                    file_name = getattr(track, 'FileNameL', '')
+                elif hasattr(track, '__getitem__') and 'FileNameL' in track:
+                    file_name = track['FileNameL']
+                
+                # Construct location from folder path and file name if both exist
+                if folder_path and file_name:
+                    # Check if folder_path already contains the file_name to avoid duplication
+                    if folder_path.endswith(file_name):
+                        location = folder_path
+                    else:
+                        # Use string concatenation instead of os.path.join to avoid scope issues
+                        location = folder_path + '/' + file_name
                 else:
-                    # Try dictionary-like access if possible
-                    if hasattr(track, '__getitem__') and 'Location' in track:
+                    # Fallback to direct Location attribute if available
+                    if hasattr(track, 'Location'):
+                        location = getattr(track, 'Location', '')
+                    elif hasattr(track, '__getitem__') and 'Location' in track:
                         location = track['Location']
                     else:
                         location = ''
@@ -402,7 +425,8 @@ class RekordboxXMLExporter:
             # Ensure location is not empty to avoid duplicate track errors
             if not location or location == 'file://localhost/':
                 # Generate a unique location based on track ID if the actual location is empty
-                location = f"file://localhost/unknown_location_{track_id}.mp3"
+                # Don't add file://localhost/ prefix as pyrekordbox will add it automatically
+                location = f"unknown_location_{track_id}.mp3"
             
             # Remove Location from track_attrs if it exists, since we'll pass it as a separate parameter
             if 'Location' in track_attrs:
@@ -633,20 +657,28 @@ class RekordboxXMLExporter:
         Returns:
             Formatted file URL
         """
+        # If path already starts with file://, return it as is to avoid double encoding
         if path.startswith('file://'):
             return path
+        
+        # If path is empty, return empty string
+        if not path:
+            return ''
         
         # Convert to file:// URL format
         # Encode spaces and special characters
         import urllib.parse
         path = os.path.abspath(path)
+        
+        # Remove leading slash if present to avoid double slash
+        if path.startswith('/'):
+            path = path[1:]
+            
         path = urllib.parse.quote(path)
         
-        # Ensure localhost is in the path
-        if not path.startswith('/'):
-            path = '/' + path
-        
-        return f"file://localhost{path}"
+        # Return path without file://localhost/ prefix
+        # pyrekordbox will add this prefix automatically
+        return path
     
     def _add_tempo_markers(self, track_elem: etree.Element, track: Dict) -> None:
         """
