@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rkbdb2xml"
+version = "0.1.0"
+description = "Export Rekordbox database to XML format"
+readme = "README.md"
+authors = [
+    {name = "kuwa72", email = "kuwa72@github.com"}
+]
+license = {text = "MIT"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "pyrekordbox>=0.4.0",
+    "rich>=10.0.0",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/kuwa72/rkbdb2xml"
+"Bug Tracker" = "https://github.com/kuwa72/rkbdb2xml/issues"
+
+[project.scripts]
+rkbdb2xml = "rkbdb2xml.cli:main"
