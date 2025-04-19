@@ -133,57 +133,33 @@ class RekordboxXMLExporter:
                 
     def _download_rekordbox_key(self) -> Optional[str]:
         """
-        Download the Rekordbox database key using pyrekordbox CLI.
-        
+        Download the Rekordbox database key using pyrekordbox internal API.
         Returns:
             The downloaded key if successful, None otherwise
         """
         try:
-            import subprocess
-            import sys
-            import json
-            import os
-            from pathlib import Path
-            
             if self.console:
-                self.console.log("[yellow]Downloading Rekordbox database key...[/yellow]")
-            
-            # Get the Python executable path from the current environment
-            python_exe = sys.executable
-            
-            # Run the pyrekordbox CLI command to download the key
-            result = subprocess.run(
-                [python_exe, "-m", "pyrekordbox", "download-key"],
-                capture_output=True,
-                text=True
-            )
-            
-            if result.returncode == 0:
+                self.console.log("[yellow]Downloading Rekordbox database key (internal API)...[/yellow]")
+            # pyrekordboxの設定からキャッシュ済みキー取得
+            from pyrekordbox.config import get_config, KeyExtractor, get_pioneer_install_dir
+            try:
+                config = get_config('rekordbox6')
+                if config and 'dp' in config and config['dp']:
+                    return config['dp']
+            except Exception as config_error:
                 if self.console:
-                    self.console.log("[green]Successfully downloaded Rekordbox database key[/green]")
-                
-                # Try to read the key from the pyrekordbox config file
-                try:
-                    # Find the pyrekordbox config file location
-                    home_dir = Path.home()
-                    config_dir = home_dir / ".pyrekordbox"
-                    config_file = config_dir / "config.json"
-                    
-                    if config_file.exists():
-                        with open(config_file, 'r') as f:
-                            config = json.load(f)
-                            if 'dp' in config:
-                                return config['dp']
-                except Exception as config_error:
-                    if self.console:
-                        self.console.log(f"[yellow]Could not read key from config: {str(config_error)}[/yellow]")
-                
-                return None
-            else:
+                    self.console.log(f"[yellow]Could not read key from config: {str(config_error)}[/yellow]")
+            # キャッシュがなければKeyExtractorで取得
+            try:
+                pioneer_install_dir = get_pioneer_install_dir()
+                extractor = KeyExtractor(str(pioneer_install_dir))
+                key = extractor.run()
+                if key:
+                    return key
+            except Exception as extract_error:
                 if self.console:
-                    self.console.log(f"[red]Failed to download key: {result.stderr}[/red]")
-                return None
-                
+                    self.console.log(f"[red]Key extraction failed: {extract_error}[/red]")
+            return None
         except Exception as e:
             if self.console:
                 self.console.log(f"[red]Error downloading key: {str(e)}[/red]")
@@ -309,6 +285,33 @@ class RekordboxXMLExporter:
         if verbose:
             self.console.log(f"Added {added_tracks} tracks to XML, {failed_tracks} tracks failed")
     
+    def _get_track_file_path(self, track) -> str:
+        """
+        トラックオブジェクトからファイルの絶対パスまたはURLを生成する。
+        FolderPathとFileNameLがあれば結合し、なければLocation属性を使う。
+        """
+        import os
+        folder_path = getattr(track, 'FolderPath', '') if hasattr(track, 'FolderPath') else ''
+        file_name = getattr(track, 'FileNameL', '') if hasattr(track, 'FileNameL') else ''
+        # dict型互換
+        if not folder_path and hasattr(track, '__getitem__') and 'FolderPath' in track:
+            folder_path = track['FolderPath']
+        if not file_name and hasattr(track, '__getitem__') and 'FileNameL' in track:
+            file_name = track['FileNameL']
+        if folder_path and file_name:
+            # 末尾重複防止
+            if folder_path.endswith(file_name):
+                path = folder_path
+            else:
+                path = os.path.join(folder_path, file_name)
+            return self._format_file_location(path)
+        # Location属性があれば使う
+        if hasattr(track, 'Location'):
+            return self._format_file_location(getattr(track, 'Location', ''))
+        if hasattr(track, '__getitem__') and 'Location' in track:
+            return self._format_file_location(track['Location'])
+        return ''
+
     def _add_track_to_xml(self, xml, track) -> bool:
         """
         Add a track to the XML collection.
@@ -322,27 +325,42 @@ class RekordboxXMLExporter:
             # Try to access as an object with attributes
             track_id = str(getattr(track, 'ID', ''))
             
-            # For location, check if FolderPath and FileNameL exist and combine them
-            folder_path = getattr(track, 'FolderPath', '')
-            file_name = getattr(track, 'FileNameL', '')
-            if folder_path and file_name:
-                location = os.path.join(folder_path, file_name)
-            else:
-                location = ''
+            # ファイルパス生成を専用メソッドに委譲
+            location = self._get_track_file_path(track)
                 
             # Prepare track attributes
             track_attrs = {}
+            # まずBPM値を明示的に処理し、AverageBpmにセット
+            bpm_raw = None
+            if hasattr(track, 'BPM'):
+                bpm_raw = getattr(track, 'BPM')
+            elif hasattr(track, '__getitem__') and 'BPM' in track:
+                bpm_raw = track['BPM']
+            if bpm_raw is not None:
+                try:
+                    bpm_value = float(bpm_raw) / 100.0
+                    track_attrs['AverageBpm'] = "{:.2f}".format(bpm_value)
+                except (ValueError, TypeError):
+                    track_attrs['AverageBpm'] = str(bpm_raw)
+            # 既存の属性ループ
             for db_field, xml_attr in self._track_attribute_mapping().items():
-                # Try to get the attribute value
+                # 'AverageBpm'は絶対に上書きしない
+                if xml_attr == 'AverageBpm':
+                    continue
                 if hasattr(track, db_field):
                     value = getattr(track, db_field)
                     if value is not None:
-                        value = str(value)
-                        # Handle special case for file location
+                        # Handle special cases
+                        if db_field in ['BPM', 'bpm', 'Bpm']:
+                            value = str(value)
+                        else:
+                            value = str(value)
                         if db_field == 'Location' or (db_field == 'FolderPath' and file_name):
-                            value = self._format_file_location(location)
-                            location = value  # Store formatted location for add_track method
-                        track_attrs[xml_attr] = value
+                            value = location
+                            location = value
+                        # ここでAverageBpmの上書きを絶対にしない
+                        if xml_attr != 'AverageBpm':
+                            track_attrs[xml_attr] = value
         except Exception as attr_error:
             # Fallback to dictionary access if attribute access fails
             try:
@@ -401,7 +419,18 @@ class RekordboxXMLExporter:
                         value = track[db_field]
                     
                     if value is not None:
-                        value = str(value)
+                        # Handle special cases
+                        if db_field in ['BPM', 'AverageBpm', 'bpm', 'average_bpm', 'Bpm']:
+                            # BPM値はデータベースでは100倍で保存されているので、100で割って正しい値に変換
+                            try:
+                                bpm_value = float(value) / 100.0
+                                value = "{:.2f}".format(bpm_value)
+                            except (ValueError, TypeError):
+                                # 変換に失敗した場合は元の値を使用
+                                value = str(value)
+                        else:
+                            value = str(value)
+                            
                         # Handle special case for file location
                         if db_field == 'Location':
                             value = self._format_file_location(value)
@@ -649,36 +678,27 @@ class RekordboxXMLExporter:
     
     def _format_file_location(self, path: str) -> str:
         """
-        Format file path as Rekordbox XML expects.
-        
+        Format file path as Rekordbox XML expects (always file:///... URL, cross-platform).
         Args:
             path: File path from the database
-            
         Returns:
-            Formatted file URL
+            Formatted file URL (file:///...)
         """
-        # If path already starts with file://, return it as is to avoid double encoding
-        if path.startswith('file://'):
-            return path
-        
-        # If path is empty, return empty string
+        import os
+        import urllib.parse
         if not path:
             return ''
-        
-        # Convert to file:// URL format
-        # Encode spaces and special characters
-        import urllib.parse
-        path = os.path.abspath(path)
-        
-        # Remove leading slash if present to avoid double slash
-        if path.startswith('/'):
-            path = path[1:]
-            
-        path = urllib.parse.quote(path)
-        
-        # Return path without file://localhost/ prefix
-        # pyrekordbox will add this prefix automatically
-        return path
+        # 絶対パス化
+        abs_path = os.path.abspath(path)
+        # Windowsパスをスラッシュ区切りに
+        abs_path = abs_path.replace('\\', '/')
+        # 先頭にドライブレターがある場合（例: C:/...）、file:///C:/...とする
+        if os.name == 'nt':
+            if not abs_path.startswith('/'):
+                abs_path = '/' + abs_path
+        url = 'file://' + abs_path
+        return urllib.parse.quote(url, safe=':/')
+
     
     def _add_tempo_markers(self, track_elem: etree.Element, track: Dict) -> None:
         """
@@ -872,39 +892,97 @@ class RekordboxXMLExporter:
         playlist_folders = []
         regular_playlists = []
         
-        # Get playlist folders
+        # SQLクエリを使用してプレイリスト情報を取得
         try:
-            # Try to get playlist folders using pyrekordbox 0.4.0 API
-            if hasattr(self.db, 'get_playlist_folders'):
-                playlist_folders = self.db.get_playlist_folders()
-            elif hasattr(self.db, 'get_folders'):
-                playlist_folders = self.db.get_folders()
-            elif hasattr(self.db, 'get_playlist'):
-                # In pyrekordbox 0.4.0, we can get all playlists and filter folders
-                all_playlists = self.db.get_playlist()
-                for playlist in all_playlists:
-                    # Check if it's a folder (Type=0)
-                    if hasattr(playlist, 'Type') and getattr(playlist, 'Type') == 0:
-                        playlist_folders.append(playlist)
+            from sqlalchemy import text
+            
+            if hasattr(self.db, 'engine'):
+                with self.db.engine.connect() as conn:
+                    # プレイリストフォルダを取得 (Attribute = 1 がフォルダ)
+                    folder_query = text("SELECT ID, Seq, Name, ParentID FROM djmdPlaylist WHERE Attribute = 1 ORDER BY Seq")
+                    folder_results = conn.execute(folder_query).fetchall()
+                    
+                    for folder in folder_results:
+                        folder_dict = {
+                            'Id': folder[0],
+                            'Seq': folder[1],
+                            'Name': folder[2],
+                            'ParentId': folder[3]
+                        }
+                        playlist_folders.append(folder_dict)
+                    
+                    # 通常のプレイリストを取得 (Attribute = 0 が通常のプレイリスト)
+                    playlist_query = text("SELECT ID, Seq, Name, ParentID FROM djmdPlaylist WHERE Attribute = 0 ORDER BY Seq")
+                    playlist_results = conn.execute(playlist_query).fetchall()
+                    
+                    for playlist in playlist_results:
+                        playlist_dict = {
+                            'Id': playlist[0],
+                            'Seq': playlist[1],
+                            'Name': playlist[2],
+                            'ParentId': playlist[3]
+                        }
+                        regular_playlists.append(playlist_dict)
+                    
+                    if self.console:
+                        self.console.log(f"[green]Found {len(playlist_folders)} folders and {len(regular_playlists)} playlists using SQL query[/green]")
+            else:
+                # 従来のメソッドを試す（フォールバック）
+                # Get playlist folders
+                if hasattr(self.db, 'get_playlist_folders'):
+                    playlist_folders = self.db.get_playlist_folders()
+                elif hasattr(self.db, 'get_folders'):
+                    playlist_folders = self.db.get_folders()
+                elif hasattr(self.db, 'get_playlist'):
+                    # In pyrekordbox 0.4.0, we can get all playlists and filter folders
+                    all_playlists = self.db.get_playlist()
+                    for playlist in all_playlists:
+                        # Check if it's a folder (Type=0)
+                        if hasattr(playlist, 'Type') and getattr(playlist, 'Type') == 0:
+                            playlist_folders.append(playlist)
+                
+                # Get regular playlists
+                if hasattr(self.db, 'get_playlists'):
+                    regular_playlists = self.db.get_playlists()
+                elif hasattr(self.db, 'get_playlist'):
+                    # In pyrekordbox 0.4.0, we can get all playlists and filter non-folders
+                    all_playlists = self.db.get_playlist()
+                    for playlist in all_playlists:
+                        # Check if it's not a folder (Type=1)
+                        if hasattr(playlist, 'Type') and getattr(playlist, 'Type') == 1:
+                            regular_playlists.append(playlist)
         except Exception as e:
             if self.console:
-                self.console.log(f"[yellow]Warning: Failed to get playlist folders: {e}[/yellow]")
-        
-        # Get regular playlists
-        try:
-            # Try to get playlists using pyrekordbox 0.4.0 API
-            if hasattr(self.db, 'get_playlists'):
-                regular_playlists = self.db.get_playlists()
-            elif hasattr(self.db, 'get_playlist'):
-                # In pyrekordbox 0.4.0, we can get all playlists and filter non-folders
-                all_playlists = self.db.get_playlist()
-                for playlist in all_playlists:
-                    # Check if it's not a folder (Type=1)
-                    if hasattr(playlist, 'Type') and getattr(playlist, 'Type') == 1:
-                        regular_playlists.append(playlist)
-        except Exception as e:
-            if self.console:
-                self.console.log(f"[yellow]Warning: Failed to get playlists: {e}[/yellow]")
+                self.console.log(f"[yellow]Warning: Failed to get playlists using SQL: {e}[/yellow]")
+            
+            # 従来のメソッドを試す（フォールバック）
+            try:
+                # Get playlist folders
+                if hasattr(self.db, 'get_playlist_folders'):
+                    playlist_folders = self.db.get_playlist_folders()
+                elif hasattr(self.db, 'get_folders'):
+                    playlist_folders = self.db.get_folders()
+                elif hasattr(self.db, 'get_playlist'):
+                    # In pyrekordbox 0.4.0, we can get all playlists and filter folders
+                    all_playlists = self.db.get_playlist()
+                    for playlist in all_playlists:
+                        # Check if it's a folder (Type=0)
+                        if hasattr(playlist, 'Type') and getattr(playlist, 'Type') == 0:
+                            playlist_folders.append(playlist)
+                
+                # Get regular playlists
+                if hasattr(self.db, 'get_playlists'):
+                    regular_playlists = self.db.get_playlists()
+                elif hasattr(self.db, 'get_playlist'):
+                    # In pyrekordbox 0.4.0, we can get all playlists and filter non-folders
+                    all_playlists = self.db.get_playlist()
+                    for playlist in all_playlists:
+                        # Check if it's not a folder (Type=1)
+                        if hasattr(playlist, 'Type') and getattr(playlist, 'Type') == 1:
+                            regular_playlists.append(playlist)
+            except Exception as e2:
+                if self.console:
+                    self.console.log(f"[yellow]Warning: Failed to get playlists using fallback methods: {e2}[/yellow]")
         
         # Convert DjmdContent objects to dictionaries if needed
         normalized_folders = []
@@ -1087,17 +1165,48 @@ class RekordboxXMLExporter:
         # Get tracks in playlist
         playlist_entries = []
         
-        # Try different methods to get playlist entries
+        # SQLクエリを使用してプレイリスト内の曲情報を取得
         try:
-            if hasattr(self.db, 'get_playlist_entries'):
-                playlist_entries = self.db.get_playlist_entries(playlist_id)
-            elif hasattr(self.db, 'get_playlist_songs'):
-                playlist_entries = self.db.get_playlist_songs(playlist_id)
-            elif hasattr(self.db, 'get_playlist_contents'):
-                playlist_entries = self.db.get_playlist_contents(playlist_id)
+            from sqlalchemy import text
+            
+            if hasattr(self.db, 'engine'):
+                with self.db.engine.connect() as conn:
+                    # プレイリスト内の曲を取得
+                    query = text(f"SELECT ContentID, TrackNo FROM djmdSongPlaylist WHERE PlaylistID = :playlist_id ORDER BY TrackNo")
+                    entries = conn.execute(query, {"playlist_id": playlist_id}).fetchall()
+                    
+                    for entry in entries:
+                        entry_dict = {
+                            'TrackID': entry[0],
+                            'TrackNo': entry[1]
+                        }
+                        playlist_entries.append(entry_dict)
+                    
+                    if self.console and len(playlist_entries) > 0:
+                        self.console.log(f"[green]Found {len(playlist_entries)} tracks in playlist {playlist_id} using SQL query[/green]")
+            else:
+                # 従来のメソッドを試す（フォールバック）
+                if hasattr(self.db, 'get_playlist_entries'):
+                    playlist_entries = self.db.get_playlist_entries(playlist_id)
+                elif hasattr(self.db, 'get_playlist_songs'):
+                    playlist_entries = self.db.get_playlist_songs(playlist_id)
+                elif hasattr(self.db, 'get_playlist_contents'):
+                    playlist_entries = self.db.get_playlist_contents(playlist_id)
         except Exception as e:
             if self.console:
-                self.console.log(f"[yellow]Warning: Failed to get playlist entries: {e}[/yellow]")
+                self.console.log(f"[yellow]Warning: Failed to get playlist entries using SQL: {e}[/yellow]")
+            
+            # 従来のメソッドを試す（フォールバック）
+            try:
+                if hasattr(self.db, 'get_playlist_entries'):
+                    playlist_entries = self.db.get_playlist_entries(playlist_id)
+                elif hasattr(self.db, 'get_playlist_songs'):
+                    playlist_entries = self.db.get_playlist_songs(playlist_id)
+                elif hasattr(self.db, 'get_playlist_contents'):
+                    playlist_entries = self.db.get_playlist_contents(playlist_id)
+            except Exception as e2:
+                if self.console:
+                    self.console.log(f"[yellow]Warning: Failed to get playlist entries using fallback methods: {e2}[/yellow]")
         
         # Normalize playlist entries
         normalized_entries = []
@@ -1132,11 +1241,23 @@ class RekordboxXMLExporter:
             track_id = entry.get('TrackID')
             if track_id:
                 try:
-                    # Add track to playlist using track ID
-                    playlist_node.add_track(track_id=str(track_id))
+                    # pyrekordbox 0.4.0のAPIでは、add_trackメソッドはtrack_idキーワード引数を受け付けない
+                    # 代わりにトラックIDを直接渡す
+                    playlist_node.add_track(str(track_id))
                 except Exception as e:
-                    if self.console:
-                        self.console.log(f"[yellow]Warning: Could not add track {track_id} to playlist: {str(e)}[/yellow]")
+                    # 別の方法を試す
+                    try:
+                        # XMLオブジェクトからトラックを取得して追加する
+                        track = xml.get_track(str(track_id))
+                        if track:
+                            playlist_node.add_track(track)
+                        else:
+                            # トラックIDを持つ要素を直接作成して追加
+                            track_elem = etree.Element("TRACK", KEY=str(track_id))
+                            playlist_node.append(track_elem)
+                    except Exception as e2:
+                        if self.console:
+                            self.console.log(f"[yellow]Warning: Could not add track {track_id} to playlist: {str(e)} / {str(e2)}[/yellow]")
     
     def _add_playlist_to_node(self, parent_node: etree.Element, playlist: Dict) -> etree.Element:
         """

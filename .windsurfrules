@@ -1,0 +1,6 @@
+- use venv, .venv is venv directory
+- pyrekordbox >= 0.4.0
+  - know how to use pyrekordbox, investigate if needed
+- don't use mock for testing
+  - Rekordboxがインストール済みの前提で実際にテストする
+  - test_rkb6_export.xml is exported from tests/data/rekordbox_test.db using Rekordbox6
