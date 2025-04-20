@@ -262,6 +262,12 @@ class RekordboxXMLExporter:
         if verbose:
             self.console.log(f"Found {len(tracks)} tracks in database")
         
+        # Sort tracks by Sequence attribute to match Rekordbox export order
+        try:
+            tracks = sorted(tracks, key=lambda t: getattr(t, "Sequence", t.get("Sequence", 0)))
+        except Exception:
+            pass
+        
         # Create a track processing task if in verbose mode
         track_task = None
         if verbose:
@@ -271,14 +277,18 @@ class RekordboxXMLExporter:
         added_tracks = 0
         failed_tracks = 0
         
-        # Add each track to the collection
+        # Add each track to the collection（LocationがNone/空文字のトラックはスキップ）
         for track in tracks:
+            location = self._get_track_file_path(track)
+            if location is None or location == '':
+                # Location未設定のトラックはXML出力対象外
+                continue
             success = self._add_track_to_xml(xml, track)
             if success:
                 added_tracks += 1
             else:
                 failed_tracks += 1
-            
+        
             if track_task:
                 progress.update(track_task, advance=1)
         
@@ -288,8 +298,21 @@ class RekordboxXMLExporter:
     def _get_track_file_path(self, track) -> str:
         """
         トラックオブジェクトからファイルの絶対パスまたはURLを生成する。
-        FolderPathとFileNameLがあれば結合し、なければLocation属性を使う。
+        
         """
+        if hasattr(track, 'Location'):
+            loc = getattr(track, 'Location', '')
+            # If already a file URL, use as-is
+            if isinstance(loc, str) and loc.startswith('file://'):
+                return loc
+            return self._format_file_location(loc)
+        if hasattr(track, '__getitem__') and 'Location' in track:
+            loc = track['Location']
+            # If already a file URL, use as-is
+            if isinstance(loc, str) and loc.startswith('file://'):
+                return loc
+            return self._format_file_location(loc)
+
         import os
         folder_path = getattr(track, 'FolderPath', '') if hasattr(track, 'FolderPath') else ''
         file_name = getattr(track, 'FileNameL', '') if hasattr(track, 'FileNameL') else ''
@@ -306,10 +329,6 @@ class RekordboxXMLExporter:
                 path = os.path.join(folder_path, file_name)
             return self._format_file_location(path)
         # Location属性があれば使う
-        if hasattr(track, 'Location'):
-            return self._format_file_location(getattr(track, 'Location', ''))
-        if hasattr(track, '__getitem__') and 'Location' in track:
-            return self._format_file_location(track['Location'])
         return ''
 
     def _add_track_to_xml(self, xml, track) -> bool:

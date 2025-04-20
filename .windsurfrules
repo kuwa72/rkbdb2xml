@@ -1,6 +1,15 @@
-- use venv, .venv is venv directory
+- use venv for all python execution, .venv is venv directory
 - pyrekordbox >= 0.4.0
   - know how to use pyrekordbox, investigate if needed
 - don't use mock for testing
   - Rekordboxがインストール済みの前提で実際にテストする
   - test_rkb6_export.xml is exported from tests/data/rekordbox_test.db using Rekordbox6
+- This project goal is not complete compatibility with Rekordbox
+  - for using cdj350/800, is not supported hot cue/memory cue/grid/display japanese
+  - Should be support track info(filepath,bpm,title,artist,album)/playlist
+  - Optional feature:
+    - convert to romaji: title, artist, album. (default: off)
+    - add bpm to title. (default: off)
+    - sort playlist by bpm. (default: off)
+    - recreate playlist by segment each 10 bpm. (default: off)
+- If you get information(mainly library, API, interface, sample code), should update your memory
