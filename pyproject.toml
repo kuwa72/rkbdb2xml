@@ -28,3 +28,7 @@ dependencies = [
 
 [project.scripts]
 rkbdb2xml = "rkbdb2xml.cli:main"
+
+[flake8]
+ignore = ["E203", "E501"]
+exclude = [".venv", "__pycache__"]

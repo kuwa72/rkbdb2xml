@@ -9,7 +9,11 @@
   - Should be support track info(filepath,bpm,title,artist,album)/playlist
   - Optional feature:
     - convert to romaji: title, artist, album. (default: off)
+      ｰ use https://github.com/kuwa72/romann
     - add bpm to title. (default: off)
     - sort playlist by bpm. (default: off)
     - recreate playlist by segment each 10 bpm. (default: off)
 - If you get information(mainly library, API, interface, sample code), should update your memory
+- Should follow PEP8
+- Should be TDD
+- Should be compatible with Rekordbox v6/v7
