@@ -3,14 +3,10 @@ Command line interface for rkbdb2xml.
 """
 
 import os
-import sys
 from pathlib import Path
 from typing import Optional
 
 import typer
-from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
-from rich.prompt import Confirm
 
 from .rkbdb2xml import export_rekordbox_db_to_xml
 
@@ -18,9 +14,6 @@ app = typer.Typer(
     help="Generate XML file from Rekordbox database using pyrekordbox library.", 
     add_completion=False
 )
-
-console = Console()
-
 
 @app.command()
 def export(
@@ -64,37 +57,27 @@ def export(
     the Rekordbox database on your system.
     """
     if output.exists() and not force:
-        if not Confirm.ask(f"Output file {output} already exists. Overwrite?"):
-            console.print("[bold red]Operation cancelled.[/bold red]")
-            raise typer.Exit(1)
+        print(f"Output file {output} already exists. Use --force to overwrite.")
+        raise typer.Exit(1)
     
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[bold blue]{task.description}[/bold blue]"),
-        console=console,
-        transient=True,
-    ) as progress:
-        task = progress.add_task("Exporting Rekordbox database to XML...", total=None)
-        
-        try:
-            # Convert Path to str if db_path is provided, otherwise pass None
-            db_path_str = str(db_path) if db_path else None
-            export_rekordbox_db_to_xml(db_path_str, str(output), verbose, db_key)
-            progress.update(task, completed=True)
-            console.print(f"[bold green]Successfully exported database to {output}[/bold green]")
-        except Exception as e:
-            progress.update(task, completed=True)
-            console.print(f"[bold red]Error: {str(e)}[/bold red]")
-            if verbose:
-                console.print_exception()
-            raise typer.Exit(1)
+    try:
+        # Convert Path to str if db_path is provided, otherwise pass None
+        db_path_str = str(db_path) if db_path else None
+        export_rekordbox_db_to_xml(db_path_str, str(output), db_key, verbose)
+    except Exception as e:
+        print(f"Failed to export Rekordbox database to XML: {e}")
+        if verbose:
+            # Print full traceback
+            import traceback
+            traceback.print_exc()
+        raise typer.Exit(1)
 
 
 @app.command()
 def version() -> None:
     """Show the version of rkbdb2xml."""
     from . import __version__
-    console.print(f"rkbdb2xml version [bold]{__version__}[/bold]")
+    print(f"rkbdb2xml version {__version__}")
 
 
 def main() -> None:
