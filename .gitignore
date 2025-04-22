@@ -42,3 +42,4 @@ ENV/
 !tests/data/rekordbox_test.db
 *.xml
 !rkb_sample.xml
+!tests/data/test_rkb6_export.xml

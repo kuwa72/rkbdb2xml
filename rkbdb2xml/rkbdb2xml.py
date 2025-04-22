@@ -84,7 +84,7 @@ class RekordboxXMLExporter:
         """
         xml = RekordboxXml()
         self._add_playlists(xml)
-        # self._add_tracks_to_collection(xml)
+        self._add_tracks_to_collection(xml)
         self.verbose(f"Saving XML to {path}")
         xml.save(path)
 
@@ -214,42 +214,22 @@ class RekordboxXMLExporter:
         db_xml_playlist_tuple_cue = [(db_root, root)]
 
         # find child folders, add to child, and remove them from all_playlists
-        while len(all_playlists) > 0:
-            found = False
-            for playlist in all_playlists:
-                if playlist.ID == db_root.ID:
-                    continue
-                self.verbose(
-                    f"traversing playlist: {playlist}, parent: {playlist.ParentID}"
-                )
-                parent = db_xml_playlist_tuple_cue[-1][0]
-                if playlist.ParentID == parent.ID:
-                    found = True
-                    self.verbose(f"adding playlist: {playlist}")
-                    # playlist or smartplaylist の場合は子に追加して終わり
-                    if playlist.is_folder:
-
-                        db_xml_playlist_tuple_cue.append(
-                            (
-                                playlist,
-                                db_xml_playlist_tuple_cue[-1][1].add_playlist_folder(
-                                    playlist.Name
-                                ),
-                            )
-                        )
-                        all_playlists.remove(playlist)
-                        break
-                    if playlist.is_playlist:
-                        pl = db_xml_playlist_tuple_cue[-1][1].add_playlist(
-                            playlist.Name
-                        )
-                        self._add_playlists_to_playlist(pl, playlist)
-                        all_playlists.remove(playlist)
-                        break
-                    break
-            if not found:
+        while db_xml_playlist_tuple_cue:
+            parent, parent_xml = db_xml_playlist_tuple_cue[-1]
+            # 親IDが一致する子ノードをすべて抽出
+            children = [pl for pl in all_playlists if pl.ParentID == parent.ID]
+            if not children:
                 db_xml_playlist_tuple_cue.pop()
-                break
+                continue
+            for child in children:
+                self.verbose(f"adding playlist: {child} (parent: {parent.ID})")
+                if child.is_folder:
+                    child_xml = parent_xml.add_playlist_folder(child.Name)
+                    db_xml_playlist_tuple_cue.append((child, child_xml))
+                elif child.is_playlist:
+                    pl_xml = parent_xml.add_playlist(child.Name)
+                    self._add_playlists_to_playlist(pl_xml, child)
+                all_playlists.remove(child)
 
     def _add_playlists_to_playlist(self, playlist_node, playlist) -> None:
         """
