@@ -29,11 +29,21 @@ class RekordboxXMLExporter:
         db_path: Optional[str] = None,
         db_key: Optional[str] = None,
         use_verbose: bool = False,
+        use_roman: bool = False,
     ):
         """
         Initialize the exporter with the path to the Rekordbox database.
         """
         self._verbose = use_verbose
+        self._use_roman = use_roman
+        self._roman_converter = None
+        if use_roman:
+            try:
+                from romann import RomanConverter
+                self._roman_converter = RomanConverter()
+            except Exception as e:
+                print("[WARN] romannライブラリの初期化に失敗しました。ローマ字変換は無効化されます。", e)
+                self._roman_converter = None
         self._check_rekordbox_running()
         self._connect_to_database(db_path, db_key)
 
@@ -112,6 +122,24 @@ class RekordboxXMLExporter:
             self.verbose(f"Processing track: {track}")
             self._add_track_to_xml(xml, track)
 
+    def _romanize(self, value: str) -> str:
+        """
+        ローマ字変換（有効時のみ）
+        ASCIIのみの場合は変換をスキップ
+        """
+        if not value:
+            return value
+        if value.isascii():
+            return value
+        if self._use_roman and self._roman_converter:
+            try:
+                return self._roman_converter.to_roman(value)
+            except Exception as e:
+                self.verbose(f"[WARN] romann変換失敗: {value}: {e}")
+                return value
+        return value
+
+
     def _add_track_to_xml(self, xml, track) -> bool:
         """
         Add a track to the XML collection.
@@ -131,6 +159,11 @@ class RekordboxXMLExporter:
                 xml_attr,
                 (getattr(track, db_field) or "") if hasattr(track, db_field) else "",
             )
+
+            # ローマ字変換
+            if xml_attr in ("Name", "Artist", "Album"):
+                value = str(value) if value is not None else ""
+                value = self._romanize(value)
             if value is not None:
                 track_attrs[xml_attr] = value
 
@@ -224,10 +257,10 @@ class RekordboxXMLExporter:
             for child in children:
                 self.verbose(f"adding playlist: {child} (parent: {parent.ID})")
                 if child.is_folder:
-                    child_xml = parent_xml.add_playlist_folder(child.Name)
+                    child_xml = parent_xml.add_playlist_folder(self._romanize(child.Name))
                     db_xml_playlist_tuple_cue.append((child, child_xml))
                 elif child.is_playlist:
-                    pl_xml = parent_xml.add_playlist(child.Name)
+                    pl_xml = parent_xml.add_playlist(self._romanize(child.Name))
                     self._add_playlists_to_playlist(pl_xml, child)
                 all_playlists.remove(child)
 
@@ -258,6 +291,7 @@ def export_rekordbox_db_to_xml(
     output_path: str,
     db_key: Optional[str] = None,
     verbose: bool = False,
+    roman: bool = False,
 ) -> None:
     """
     Export a Rekordbox database to XML format.
@@ -268,7 +302,7 @@ def export_rekordbox_db_to_xml(
         verbose: Show detailed output during export
         db_key: Rekordbox database key (optional, for newer Rekordbox versions)
     """
-    exporter = RekordboxXMLExporter(db_path, db_key=db_key, use_verbose=verbose)
+    exporter = RekordboxXMLExporter(db_path, db_key=db_key, use_verbose=verbose, use_roman=roman)
     try:
         exporter.generate_xml(output_path)
     finally:
