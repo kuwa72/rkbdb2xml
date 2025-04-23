@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Union, Tuple, Any
 import urllib.parse
 import urllib.request
+import hashlib
 
 import pyrekordbox
 from pyrekordbox.rbxml import RekordboxXml
@@ -14,6 +15,7 @@ from pyrekordbox.db6 import Rekordbox6Database as RekordboxDatabase, DjmdPlaylis
 from pyrekordbox.config import get_config, KeyExtractor, get_pioneer_install_dir
 from lxml import etree
 import psutil
+import shutil
 
 REKORDBOX_VERSION = "6.8.0"
 
@@ -104,6 +106,11 @@ class RekordboxXMLExporter:
         self._add_tracks_to_collection(xml)
         self.verbose(f"Saving XML to {path}")
         xml.save(path)
+        # ファイルコピー用出力ディレクトリを作成し、元ファイルを複製
+        export_dir = Path(path).with_suffix("")
+        export_dir.mkdir(parents=True, exist_ok=True)
+        self.verbose(f"Copying files to {export_dir}")
+        self._copy_files(export_dir)
 
     def _add_tracks_to_collection(self, xml) -> None:
         """Add all tracks to the XML collection."""
@@ -380,6 +387,40 @@ class RekordboxXMLExporter:
         # In version 0.4.0+ closing might not be necessary,
         # but we'll call it if the method exists
         self.db.close()
+
+    def _copy_files(self, export_dir: Path) -> None:
+        """
+        Copy selected track files to export directory, preserving home-relative paths.
+        """
+        # Flatten copy: use md5 of full path as filename
+        for content in self.db.get_content().all():
+            if content.ID not in self._selected_track_ids:
+                continue
+            loc = getattr(content, 'FolderPath', None)
+            if not loc:
+                self.verbose("FolderPath missing, skipping")
+                continue
+            # Parse file:// URI or raw path
+            if "://" in loc:
+                parsed = urllib.parse.urlparse(loc)
+                path_str = urllib.parse.unquote(parsed.path)
+                if os.name == 'nt' and path_str.startswith('/'):
+                    path_str = path_str.lstrip('/')
+            else:
+                path_str = loc
+            orig = Path(path_str)
+            if not orig.exists():
+                self.verbose(f"Source file not found, skipping: {orig}")
+                continue
+            # MD5 hash as filename (no extension)
+            md5_hex = hashlib.md5(path_str.encode("utf-8")).hexdigest()
+            # 元ファイルの拡張子を保持
+            ext = orig.suffix
+            dest = export_dir / f"{md5_hex}{ext}"
+            try:
+                shutil.copy2(orig, dest)
+            except Exception as e:
+                self.verbose(f"Copy failed: {orig} → {dest}: {e}")
 
 
 def export_rekordbox_db_to_xml(

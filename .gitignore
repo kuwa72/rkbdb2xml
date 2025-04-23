@@ -43,3 +43,5 @@ ENV/
 *.xml
 !rkb_sample.xml
 !tests/data/test_rkb6_export.xml
+
+/temp
