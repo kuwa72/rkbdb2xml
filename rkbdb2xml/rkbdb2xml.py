@@ -287,15 +287,22 @@ class RekordboxXMLExporter:
                 path_map[pl.ID] = "/".join(parts)
             # Determine initial target IDs from specs
             target_ids = set()
+            matched_specs = set()
             for spec in self._playlist_specs:
                 if spec.isdigit():
                     sid = int(spec)
                     if sid in id_map:
                         target_ids.add(sid)
+                        matched_specs.add(spec)
                 else:
                     for pid, ppath in path_map.items():
                         if ppath == spec:
                             target_ids.add(pid)
+                            matched_specs.add(spec)
+            # 無効な指定をエラーとする
+            unmatched = [spec for spec in self._playlist_specs if spec not in matched_specs]
+            if unmatched:
+                raise ValueError(f"Invalid playlist spec(s): {', '.join(unmatched)}")
             # Build parent->children map
             parent_map: Dict[Any, List] = {}
             for pl in orig_playlists:
