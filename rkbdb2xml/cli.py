@@ -58,6 +58,11 @@ def export(
         "--bpm",
         help="Add BPM as integer at the beginning of the title."
     ),
+    orderby: str = typer.Option(
+        "default",
+        "--orderby",
+        help="Specify the order of tracks in the playlist (default/bpm). bpm specifies BPM in ascending order."
+    ),
 ) -> None:
     """
     Export a Rekordbox database to XML format.
@@ -73,7 +78,7 @@ def export(
     try:
         # Convert Path to str if db_path is provided, otherwise pass None
         db_path_str = str(db_path) if db_path else None
-        export_rekordbox_db_to_xml(db_path_str, str(output), db_key, verbose, roman, bpm)
+        export_rekordbox_db_to_xml(db_path_str, str(output), db_key, verbose, roman, bpm, orderby)
     except Exception as e:
         print(f"Failed to export Rekordbox database to XML: {e}")
         if verbose:

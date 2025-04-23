@@ -31,7 +31,26 @@ class RekordboxXMLExporter:
         use_verbose: bool = False,
         use_roman: bool = False,
         use_bpm: bool = False,
-    ): 
+        orderby: str = "default",
+    ):
+        """
+        Initialize the exporter with the path to the Rekordbox database.
+        """
+        self._verbose = use_verbose
+        self._use_roman = use_roman
+        self._use_bpm = use_bpm
+        self._orderby = orderby
+        self._roman_converter = None
+        if use_roman:
+            try:
+                from romann import RomanConverter
+                self._roman_converter = RomanConverter()
+            except Exception as e:
+                print("[WARN] romannライブラリの初期化に失敗しました。ローマ字変換は無効化されます。", e)
+                self._roman_converter = None
+        self._check_rekordbox_running()
+        self._connect_to_database(db_path, db_key)
+
         """
         Initialize the exporter with the path to the Rekordbox database.
         """
@@ -299,9 +318,19 @@ class RekordboxXMLExporter:
         # Get tracks in playlist
         playlist_entries = self.db.get_playlist_contents(playlist).all()
 
+        # --orderby=bpm オプション対応
+        if getattr(self, '_orderby', 'default') == 'bpm':
+            def safe_bpm(entry):
+                bpm = entry.BPM
+                if not bpm:
+                    return 0
+                return bpm
+            playlist_entries = sorted(playlist_entries, key=safe_bpm)
+
         # Normalize playlist entries
         for entry in playlist_entries:
             playlist_node.add_track(entry.ID)
+
 
     def close(self) -> None:
         """Close the database connection when done."""
@@ -317,6 +346,7 @@ def export_rekordbox_db_to_xml(
     verbose: bool = False,
     roman: bool = False,
     bpm: bool = False,
+    orderby: str = "default",
 ) -> None:
     """
     Export a Rekordbox database to XML format.
@@ -327,7 +357,7 @@ def export_rekordbox_db_to_xml(
         verbose: Show detailed output during export
         db_key: Rekordbox database key (optional, for newer Rekordbox versions)
     """
-    exporter = RekordboxXMLExporter(db_path, db_key=db_key, use_verbose=verbose, use_roman=roman, use_bpm=bpm)
+    exporter = RekordboxXMLExporter(db_path, db_key=db_key, use_verbose=verbose, use_roman=roman, use_bpm=bpm, orderby=orderby)
     try:
         exporter.generate_xml(output_path)
     finally:
