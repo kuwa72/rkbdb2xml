@@ -30,12 +30,14 @@ class RekordboxXMLExporter:
         db_key: Optional[str] = None,
         use_verbose: bool = False,
         use_roman: bool = False,
-    ):
+        use_bpm: bool = False,
+    ): 
         """
         Initialize the exporter with the path to the Rekordbox database.
         """
         self._verbose = use_verbose
         self._use_roman = use_roman
+        self._use_bpm = use_bpm
         self._roman_converter = None
         if use_roman:
             try:
@@ -151,17 +153,39 @@ class RekordboxXMLExporter:
         # Prepare track attributes
         track_attrs = {}
         # 既存の属性ループ
-        for db_field, xml_attr in self._track_attribute_mapping().items():
-            switch = {
-                "AverageBpm": "{:.2f}".format(track.BPM / 100.0),
-            }
-            value = switch.get(
-                xml_attr,
-                (getattr(track, db_field) or "") if hasattr(track, db_field) else "",
-            )
+        # まずAverageBpmをtrack_attrsに格納
+        def safe_bpm_value(val):
+            try:
+                return float(val) / 100.0
+            except Exception:
+                return None
+        avg_bpm_val = safe_bpm_value(getattr(track, 'BPM', None))
+        track_attrs = {}
+        track_attrs["AverageBpm"] = "{:.2f}".format(avg_bpm_val) if avg_bpm_val is not None else ""
 
+        # その後、他属性を処理
+        for db_field, xml_attr in self._track_attribute_mapping().items():
+            if xml_attr == "AverageBpm":
+                continue  # すでに格納済み
+            value = (getattr(track, db_field) or "") if hasattr(track, db_field) else ""
             # ローマ字変換
-            if xml_attr in ("Name", "Artist", "Album"):
+            if xml_attr == "Name":
+                value = str(value) if value is not None else ""
+                value = self._romanize(value)
+                # --bpm有効時はタイトル先頭にBPM整数値を付与（AverageBpmを利用）
+                if self._use_bpm:
+                    avg_bpm = track_attrs.get("AverageBpm")
+                    try:
+                        bpm_float = float(avg_bpm) if avg_bpm else 0.0
+                        bpm_int = int(bpm_float) if bpm_float > 0 else None
+                    except Exception:
+                        bpm_int = None
+                    if bpm_int is not None:
+                        old_value = value
+                        value = f"{bpm_int} {value}"
+                        if self._verbose:
+                            print(f"[BPM TITLE] {old_value} → {value} (AverageBpm={avg_bpm})")
+            elif xml_attr in ("Artist", "Album"):
                 value = str(value) if value is not None else ""
                 value = self._romanize(value)
             if value is not None:
@@ -292,6 +316,7 @@ def export_rekordbox_db_to_xml(
     db_key: Optional[str] = None,
     verbose: bool = False,
     roman: bool = False,
+    bpm: bool = False,
 ) -> None:
     """
     Export a Rekordbox database to XML format.
@@ -302,7 +327,7 @@ def export_rekordbox_db_to_xml(
         verbose: Show detailed output during export
         db_key: Rekordbox database key (optional, for newer Rekordbox versions)
     """
-    exporter = RekordboxXMLExporter(db_path, db_key=db_key, use_verbose=verbose, use_roman=roman)
+    exporter = RekordboxXMLExporter(db_path, db_key=db_key, use_verbose=verbose, use_roman=roman, use_bpm=bpm)
     try:
         exporter.generate_xml(output_path)
     finally:

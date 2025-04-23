@@ -70,9 +70,44 @@ def test_bpm_conversion_edge_cases(exporter):
     track.BPM = "invalid"
     with pytest.raises(ValueError):
         _ = float(track.BPM) / 100
+    class DummyXML:
+        def add_track(self, *args, **kwargs):
+            return None
     try:
-        exporter._add_track_to_xml(None, track)
+        exporter._add_track_to_xml(DummyXML(), track)
     except Exception as e:
         pytest.fail(f"_add_track_to_xmlで例外発生: {e}")
+
+import tempfile
+import xml.etree.ElementTree as ET
+from rkbdb2xml.rkbdb2xml import export_rekordbox_db_to_xml
+
+@pytest.mark.skipif(not os.path.exists(TEST_DB_PATH), reason="テストDBが存在しません")
+def test_bpm_option_adds_bpm_to_title():
+    """
+    --bpmオプション指定時にタイトル先頭へBPM整数値が付与されることを確認する
+    """
+    with tempfile.NamedTemporaryFile(suffix='.xml', delete=False) as tmp:
+        temp_path = tmp.name
+    try:
+        export_rekordbox_db_to_xml(TEST_DB_PATH, temp_path, bpm=True)
+        tree = ET.parse(temp_path)
+        root = tree.getroot()
+        collection = root.find('COLLECTION')
+        assert collection is not None
+        tracks = collection.findall('TRACK')
+        found = False
+        for tr in tracks:
+            name = tr.attrib.get('Name', '')
+            bpm = tr.attrib.get('AverageBpm', None)
+            # BPMが0以外かつタイトルが"<BPM(整数)><空白>"で始まるものを探す
+            if bpm and float(bpm) > 0:
+                bpm_int = str(int(float(bpm)))
+                if name.startswith(bpm_int + ' '):
+                    found = True
+                    break
+        assert found, '--bpm指定時にBPM整数値がタイトル先頭に付与されていません'
+    finally:
+        os.remove(temp_path)
 
 

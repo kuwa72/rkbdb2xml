@@ -53,6 +53,11 @@ def export(
         "--roman",
         help="Convert title, artist, album to romaji using romann library."
     ),
+    bpm: bool = typer.Option(
+        False,
+        "--bpm",
+        help="Add BPM as integer at the beginning of the title."
+    ),
 ) -> None:
     """
     Export a Rekordbox database to XML format.
@@ -68,7 +73,7 @@ def export(
     try:
         # Convert Path to str if db_path is provided, otherwise pass None
         db_path_str = str(db_path) if db_path else None
-        export_rekordbox_db_to_xml(db_path_str, str(output), db_key, verbose, roman)
+        export_rekordbox_db_to_xml(db_path_str, str(output), db_key, verbose, roman, bpm)
     except Exception as e:
         print(f"Failed to export Rekordbox database to XML: {e}")
         if verbose:
