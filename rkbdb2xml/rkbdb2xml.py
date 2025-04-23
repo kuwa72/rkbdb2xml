@@ -112,8 +112,12 @@ class RekordboxXMLExporter:
         # ファイルコピー用出力ディレクトリを作成し、元ファイルを複製
         export_dir = Path(path).with_suffix("")
         export_dir.mkdir(parents=True, exist_ok=True)
+        # Initialize mapping for updating XML locations
+        self._copy_map: Dict[str, Path] = {}
         self.verbose(f"Copying files to {export_dir}")
         self._copy_files(export_dir)
+        # Update XML Location attributes to point to copied files
+        self._update_locations(path, export_dir)
 
     def _add_tracks_to_collection(self, xml) -> None:
         """Add all tracks to the XML collection."""
@@ -426,6 +430,8 @@ class RekordboxXMLExporter:
             except Exception as e:
                 self.verbose(f"Copy failed: {orig} → {dest}: {e}")
                 continue
+            # Record mapping from original path to copied file
+            self._copy_map[path_str] = dest
             # Rewrite metadata tags using mutagen
             title_val = getattr(content, 'Title', '') or ''
             artist_val = getattr(content, 'ArtistName', '') or getattr(content, 'Artist', '') or ''
@@ -456,6 +462,34 @@ class RekordboxXMLExporter:
                 tags['\xa9alb'] = [album_val]
                 audio.tags = tags
                 audio.save(dest)
+
+    def _update_locations(self, xml_path: str, export_dir: Path) -> None:
+        """
+        Update Location attributes in XML to URIs of copied files.
+        """
+        from lxml import etree
+        import urllib.parse as up
+        import os
+        # Parse XML file
+        tree = etree.parse(xml_path)
+        # Update each TRACK Location
+        for track in tree.findall(".//TRACK"):
+            loc = track.attrib.get("Location")
+            if not loc:
+                continue
+            # Extract raw filesystem path
+            if "://" in loc:
+                parsed = up.urlparse(loc)
+                raw = up.unquote(parsed.path)
+                if os.name == "nt" and raw.startswith("/"):
+                    raw = raw.lstrip("/")
+            else:
+                raw = loc
+            dest = self._copy_map.get(raw)
+            if dest:
+                track.attrib["Location"] = dest.resolve().as_uri()
+        # Write back updated XML
+        tree.write(xml_path, encoding="UTF-8", xml_declaration=True)
 
 
 def export_rekordbox_db_to_xml(
