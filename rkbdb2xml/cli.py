@@ -4,7 +4,7 @@ Command line interface for rkbdb2xml.
 
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 import typer
 
@@ -63,6 +63,11 @@ def export(
         "--orderby",
         help="Specify the order of tracks in the playlist (default/bpm). bpm specifies BPM in ascending order."
     ),
+    playlists: Optional[List[str]] = typer.Option(
+        None,
+        "--playlists", "-p",
+        help="Comma-separated or repeated list of playlist IDs, names, or hierarchical paths."
+    ),
 ) -> None:
     """
     Export a Rekordbox database to XML format.
@@ -75,10 +80,27 @@ def export(
         print(f"Output file {output} already exists. Use --force to overwrite.")
         raise typer.Exit(1)
     
+    # Parse playlist options into list of specs
+    parsed_playlists: Optional[List[str]] = None
+    if playlists:
+        parsed: List[str] = []
+        for spec in playlists:
+            parsed.extend([s.strip() for s in spec.split(',') if s.strip()])
+        parsed_playlists = parsed
+
     try:
         # Convert Path to str if db_path is provided, otherwise pass None
         db_path_str = str(db_path) if db_path else None
-        export_rekordbox_db_to_xml(db_path_str, str(output), db_key, verbose, roman, bpm, orderby)
+        export_rekordbox_db_to_xml(
+            db_path_str,
+            str(output),
+            db_key,
+            verbose,
+            roman,
+            bpm,
+            orderby,
+            parsed_playlists,
+        )
     except Exception as e:
         print(f"Failed to export Rekordbox database to XML: {e}")
         if verbose:
