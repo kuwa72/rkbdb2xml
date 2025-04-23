@@ -8,6 +8,9 @@ from typing import Dict, List, Optional, Union, Tuple, Any
 import urllib.parse
 import urllib.request
 import hashlib
+import mutagen
+from mutagen.id3 import ID3, TIT2, TPE1, TALB
+from mutagen.mp4 import MP4
 
 import pyrekordbox
 from pyrekordbox.rbxml import RekordboxXml
@@ -157,6 +160,12 @@ class RekordboxXMLExporter:
                 return value
         return value
 
+    def _safe_bpm(self, val) -> Optional[float]:
+        """Convert raw BPM value to float BPM."""
+        try:
+            return float(val) / 100.0
+        except Exception:
+            return None
 
     def _add_track_to_xml(self, xml, track) -> bool:
         """
@@ -170,12 +179,7 @@ class RekordboxXMLExporter:
         track_attrs = {}
         # 既存の属性ループ
         # まずAverageBpmをtrack_attrsに格納
-        def safe_bpm_value(val):
-            try:
-                return float(val) / 100.0
-            except Exception:
-                return None
-        avg_bpm_val = safe_bpm_value(getattr(track, 'BPM', None))
+        avg_bpm_val = self._safe_bpm(getattr(track, 'BPM', None))
         track_attrs = {}
         track_attrs["AverageBpm"] = "{:.2f}".format(avg_bpm_val) if avg_bpm_val is not None else ""
 
@@ -392,7 +396,7 @@ class RekordboxXMLExporter:
         """
         Copy selected track files to export directory, preserving home-relative paths.
         """
-        # Flatten copy: use md5 of full path as filename
+        # Flatten copy: use md5 of full path as filename and rewrite tags
         for content in self.db.get_content().all():
             if content.ID not in self._selected_track_ids:
                 continue
@@ -421,6 +425,37 @@ class RekordboxXMLExporter:
                 shutil.copy2(orig, dest)
             except Exception as e:
                 self.verbose(f"Copy failed: {orig} → {dest}: {e}")
+                continue
+            # Rewrite metadata tags using mutagen
+            title_val = getattr(content, 'Title', '') or ''
+            artist_val = getattr(content, 'ArtistName', '') or getattr(content, 'Artist', '') or ''
+            album_val = getattr(content, 'AlbumName', '') or getattr(content, 'Album', '') or ''
+            if self._use_roman:
+                title_val = self._romanize(title_val)
+                artist_val = self._romanize(artist_val)
+                album_val = self._romanize(album_val)
+            if self._use_bpm:
+                bpm_val = self._safe_bpm(getattr(content, 'BPM', None))
+                if bpm_val:
+                    title_val = f"{int(bpm_val)} {title_val}"
+            ext = dest.suffix.lower()
+            if ext == '.mp3':
+                try:
+                    audio = ID3(dest)
+                except mutagen.id3.ID3NoHeaderError:
+                    audio = ID3()
+                audio['TIT2'] = TIT2(encoding=3, text=title_val)
+                audio['TPE1'] = TPE1(encoding=3, text=artist_val)
+                audio['TALB'] = TALB(encoding=3, text=album_val)
+                audio.save(dest)
+            elif ext in ('.m4a', '.mp4'):
+                audio = MP4(dest)
+                tags = audio.tags or {}
+                tags['\xa9nam'] = [title_val]
+                tags['\xa9ART'] = [artist_val]
+                tags['\xa9alb'] = [album_val]
+                audio.tags = tags
+                audio.save(dest)
 
 
 def export_rekordbox_db_to_xml(
