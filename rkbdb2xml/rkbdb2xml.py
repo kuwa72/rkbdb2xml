@@ -216,8 +216,11 @@ class RekordboxXMLExporter:
                 track_attrs[xml_attr] = value
 
         self.verbose(f"Adding track: {track}")
-        # Add track to XML
-        xml.add_track(track.FolderPath, **track_attrs)
+        # Add track element and attach TEMPO child
+        track_elem = xml.add_track(track.FolderPath, **track_attrs)
+        bpm_str = track_attrs.get("AverageBpm")
+        if bpm_str:
+            track_elem.add_tempo(Inizio="0.025", Bpm=bpm_str, Metro="4/4", Battito="1")
         return True
 
     def _track_attribute_mapping(self) -> Dict[str, str]:
@@ -246,11 +249,8 @@ class RekordboxXMLExporter:
             "FileSize": "Size",  # DjmdContent attribute
             "Size": "Size",
             "Length": "TotalTime",  # DjmdContent attribute
-            "TotalTime": "TotalTime",
             "DiscNo": "DiscNumber",  # DjmdContent attribute
-            "DiscNumber": "DiscNumber",
             "TrackNo": "TrackNumber",  # DjmdContent attribute
-            "TrackNumber": "TrackNumber",
             "ReleaseYear": "Year",  # DjmdContent attribute
             "Year": "Year",
             "BPM": "AverageBpm",  # DjmdContent attribute
@@ -487,7 +487,14 @@ class RekordboxXMLExporter:
                 raw = loc
             dest = self._copy_map.get(raw)
             if dest:
-                track.attrib["Location"] = dest.resolve().as_uri()
+                # Build file URI with explicit localhost
+                uri = dest.resolve().as_uri()
+                parsed_uri = up.urlparse(uri)
+                if parsed_uri.scheme == "file" and not parsed_uri.netloc:
+                    parsed_uri = parsed_uri._replace(netloc="localhost")
+                    uri = up.urlunparse(parsed_uri)
+                track.attrib["Location"] = uri
+            # TEMPO added via Track.add_tempo; manual injection removed
         # Write back updated XML
         tree.write(xml_path, encoding="UTF-8", xml_declaration=True)
 
