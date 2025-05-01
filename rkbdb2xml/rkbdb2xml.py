@@ -220,7 +220,7 @@ class RekordboxXMLExporter:
         track_elem = xml.add_track(track.FolderPath, **track_attrs)
         bpm_str = track_attrs.get("AverageBpm")
         if bpm_str:
-            track_elem.add_tempo(Inizio="0.025", Bpm=bpm_str, Metro="4/4", Battito="1")
+            track_elem.add_tempo(Inizio="0.000", Bpm=bpm_str, Metro="4/4", Battito="1")
         return True
 
     def _track_attribute_mapping(self) -> Dict[str, str]:
@@ -425,11 +425,14 @@ class RekordboxXMLExporter:
             # 元ファイルの拡張子を保持
             ext = orig.suffix
             dest = export_dir / f"{md5_hex}{ext}"
-            try:
-                shutil.copy2(orig, dest)
-            except Exception as e:
-                self.verbose(f"Copy failed: {orig} → {dest}: {e}")
-                continue
+            
+            # コピー先があったらコピーしない。ただしタグは書き換えたいのでコピー処理だけ飛ばす。
+            if not dest.exists():
+                try:
+                    shutil.copy2(orig, dest)
+                except Exception as e:
+                    self.verbose(f"Copy failed: {orig} → {dest}: {e}")
+                    continue
             # Record mapping from original path to copied file
             self._copy_map[path_str] = dest
             # Rewrite metadata tags using mutagen
@@ -456,12 +459,12 @@ class RekordboxXMLExporter:
                 audio.save(dest)
             elif ext in ('.m4a', '.mp4'):
                 audio = MP4(dest)
-                tags = audio.tags or {}
-                tags['\xa9nam'] = [title_val]
-                tags['\xa9ART'] = [artist_val]
-                tags['\xa9alb'] = [album_val]
-                audio.tags = tags
-                audio.save(dest)
+                if audio.tags is None:
+                    audio.add_tags()
+                audio.tags['\xa9nam'] = [title_val]
+                audio.tags['\xa9ART'] = [artist_val]
+                audio.tags['\xa9alb'] = [album_val]
+                audio.save()
 
     def _update_locations(self, xml_path: str, export_dir: Path) -> None:
         """
