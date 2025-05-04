@@ -3,20 +3,25 @@ Main functionality for converting Rekordbox DB to XML.
 """
 
 import os
-from typing import Optional, Dict, List
+from pathlib import Path
+from typing import Dict, List, Optional, Union, Tuple, Any
+import urllib.parse
+import urllib.request
+import hashlib
+import mutagen
+from mutagen.id3 import ID3, TIT2, TPE1, TALB
+from mutagen.mp4 import MP4
 
 import pyrekordbox
-from pyrekordbox.db6 import Rekordbox6Database as RekordboxDatabase
 from pyrekordbox.rbxml import RekordboxXml
-from pyrekordbox.config import KeyExtractor, get_config, get_pioneer_install_dir
-
+from pyrekordbox.db6 import Rekordbox6Database as RekordboxDatabase, DjmdPlaylist
+from pyrekordbox.config import get_config, KeyExtractor, get_pioneer_install_dir
+from lxml import etree
 import psutil
-from sqlalchemy import text
+import shutil
 
-import xml.etree.ElementTree as etree
+REKORDBOX_VERSION = "6.8.0"
 
-from rich.console import Console
-from rich.progress import Progress
 
 class RekordboxXMLExporter:
     """
@@ -25,144 +30,56 @@ class RekordboxXMLExporter:
 
     def __init__(
         self,
-        db_file_path: Optional[str] = None,
-        console: Optional[Console] = None,
+        db_path: Optional[str] = None,
         db_key: Optional[str] = None,
+        use_verbose: bool = False,
+        use_roman: bool = False,
+        use_bpm: bool = False,
+        orderby: str = "default",
+        playlist_specs: Optional[List[str]] = None,
     ):
         """
         Initialize the exporter with the path to the Rekordbox database.
-
-        Args:
-            db_file_path: Path to the Rekordbox database file, or None to auto-detect
-            console: Rich console for output (optional)
-            db_key: Rekordbox database key (optional, for newer Rekordbox versions)
         """
-        self.console = console or Console()
-        self.db_path = db_file_path
-        self.db_key = db_key
+        self._verbose = use_verbose
+        self._use_roman = use_roman
+        self._use_bpm = use_bpm
+        self._orderby = orderby
+        # Playlist selection specs parsed from CLI
+        self._playlist_specs = playlist_specs
+        self._roman_converter = None
+        if use_roman:
+            try:
+                from romann import RomanConverter
+                self._roman_converter = RomanConverter()
+            except Exception as e:
+                print("[WARN] romannライブラリの初期化に失敗しました。ローマ字変換は無効化されます。", e)
+                self._roman_converter = None
+        self._check_rekordbox_running()
+        self._connect_to_database(db_path, db_key)
 
-        try:
-            self._connect_to_database()
-            # Version 0.4.0+ of pyrekordbox automatically connects the database
-            # No need to call connect() anymore
-            self.rekordbox_version = self._get_rekordbox_version()
-        except Exception as e:
-            if self.console:
-                self.console.log(
-                    "[bold red]Error connecting to Rekordbox database[/bold red]"
-                )
-            raise e
+    def verbose(self, message: str) -> None:
+        if self._verbose:
+            print(message)
 
-    def _connect_to_database(self):
+    def _connect_to_database(self, db_path: Optional[str], db_key: Optional[str]):
         """
         Connect to the Rekordbox database, handling key download if necessary.
         """
         try:
-            # Check if Rekordbox is running and warn the user
-            self._check_rekordbox_running()
-
-            # Try to connect with manually provided key if available
-            if self.db_key:
-                if self.console:
-                    self.console.log(
-                        "[blue]Using manually provided database key[/blue]"
-                    )
-                if self.db_path:
-                    self.db = RekordboxDatabase(self.db_path, key=self.db_key)
-                    if self.console:
-                        self.console.log(f"Using specified database: {self.db_path}")
-                else:
-                    self.db = RekordboxDatabase(key=self.db_key)
-                    if self.console:
-                        self.console.log("Auto-detected Rekordbox database")
-                return
-
-            # Try to connect without a key
-            if self.db_path:
-                self.db = RekordboxDatabase(self.db_path)
-                if self.console:
-                    self.console.log(f"Using specified database: {self.db_path}")
-            else:
-                # Let pyrekordbox find the database automatically
-                self.db = RekordboxDatabase()
-                if self.console:
-                    self.console.log("Auto-detected Rekordbox database")
-        except Exception as e:
-            error_str = str(e)
-            # Check if the error is about missing key
-            if (
-                "key" in error_str.lower()
-                and "not found" in error_str.lower()
-                or "could not unlock database" in error_str.lower()
-            ):
-                if self.console:
-                    self.console.log(
-                        "[yellow]Database key not found. Attempting to download key...[/yellow]"
-                    )
-
-                # Try to download the key using pyrekordbox CLI
-                key = self._download_rekordbox_key()
-
-                # If we got a key, try connecting again
-                if key:
-                    self.db_key = key
-                    try:
-                        if self.db_path:
-                            self.db = RekordboxDatabase(self.db_path, key=key)
-                        else:
-                            self.db = RekordboxDatabase(key=key)
-                        if self.console:
-                            self.console.log(
-                                "[green]Successfully connected to database with downloaded key[/green]"
-                            )
-                        return
-                    except Exception as reconnect_error:
-                        if self.console:
-                            self.console.log(
-                                f"[red]Failed to connect with downloaded key: {str(reconnect_error)}[/red]"
-                            )
-
-                # If we get here, we couldn't connect with the downloaded key
-                if (
-                    "rekordbox>6.6.5" in error_str.lower()
-                    or "rekordbox > 6.6.5" in error_str.lower()
-                ):
-                    if self.console:
-                        self.console.log(
-                            "[yellow]You are using Rekordbox 6.6.5 or newer, which requires a manual key.[/yellow]"
-                        )
-                        self.console.log(
-                            "[yellow]Please run 'python -m pyrekordbox download-key' manually and provide the key.[/yellow]"
-                        )
-
-                raise Exception(
-                    f"Failed to connect to Rekordbox database: {str(e)}. For Rekordbox 6.6.5+, please provide a key manually."
-                )
-            else:
-                # If it's not a key issue, re-raise the exception
-                if self.console:
-                    self.console.log(f"[red]Database connection error: {str(e)}[/red]")
-                raise
+            self.db = RekordboxDatabase(db_path, db_key)
+        except Exception:
+            key = self._download_rekordbox_key()
+            self.db = RekordboxDatabase(key=key)
 
     def _check_rekordbox_running(self):
         """
         Check if Rekordbox is currently running and warn the user if it is.
         """
-        try:
-            for proc in psutil.process_iter(["name"]):
-                if "rekordbox" in proc.info["name"].lower():
-                    if self.console:
-                        self.console.log(
-                            "[yellow]Warning: Rekordbox is currently running.[/yellow]"
-                        )
-                        self.console.log(
-                            "[yellow]This may cause issues with database access. Consider closing Rekordbox first.[/yellow]"
-                        )
-                    return True
-            return False
-        except Exception:
-            # Ignore errors in checking for Rekordbox process
-            return False
+        for proc in psutil.process_iter(["name"]):
+            if "rekordbox" in proc.info["name"].lower():
+                return True
+        return False
 
     def _download_rekordbox_key(self) -> Optional[str]:
         """
@@ -170,146 +87,89 @@ class RekordboxXMLExporter:
         Returns:
             The downloaded key if successful, None otherwise
         """
-        try:
-            if self.console:
-                self.console.log(
-                    "[yellow]Downloading Rekordbox database key (internal API)...[/yellow]"
-                )
-            # pyrekordboxの設定からキャッシュ済みキー取得
-            try:
-                config = get_config("rekordbox6")
-                if config and "dp" in config and config["dp"]:
-                    return config["dp"]
-            except Exception as config_error:
-                if self.console:
-                    self.console.log(
-                        f"[yellow]Could not read key from config: {str(config_error)}[/yellow]"
-                    )
-            # キャッシュがなければKeyExtractorで取得
-            try:
-                pioneer_install_dir = get_pioneer_install_dir()
-                extractor = KeyExtractor(str(pioneer_install_dir))
-                key = extractor.run()
-                if key:
-                    return key
-            except Exception as extract_error:
-                if self.console:
-                    self.console.log(
-                        f"[red]Key extraction failed: {extract_error}[/red]"
-                    )
-            return None
-        except Exception as e:
-            if self.console:
-                self.console.log(f"[red]Error downloading key: {str(e)}[/red]")
-            return None
+        config = get_config("rekordbox6")
+        if config and "dp" in config and config["dp"]:
+            return config["dp"]
 
-    def _get_rekordbox_version(self) -> str:
-        """Get the Rekordbox version from the database if possible."""
-        try:
-            return self.db.version
-        except Exception:
-            return "6.8.0"
+        # キャッシュがなければKeyExtractorで取得
+        pioneer_install_dir = get_pioneer_install_dir()
+        extractor = KeyExtractor(str(pioneer_install_dir))
+        return extractor.run()
 
-    def generate_xml(self, output_path: str, verbose: bool = False) -> None:
+    def generate_xml(self, path: str) -> None:
         """
         Generate XML file from the Rekordbox database.
 
         Args:
-            output_path: Path where the XML file should be saved
-            verbose: Show detailed output during export
+            path: Path where the XML file should be saved
         """
-        with Progress(
-            console=self.console, disable=not verbose, expand=True
-        ) as progress:
-            # Create the RekordboxXml instance
-            export_task = progress.add_task("Generating XML...", total=4)
-            xml = RekordboxXml(
-                name="rekordbox", version=self.rekordbox_version, company="AlphaTheta"
-            )
+        xml = RekordboxXml()
+        self._selected_track_ids = set()
+        self._add_playlists(xml)
+        self._add_tracks_to_collection(xml)
+        self.verbose(f"Saving XML to {path}")
+        xml.save(path)
+        # ファイルコピー用出力ディレクトリを作成し、元ファイルを複製
+        export_dir = Path(path).with_suffix("")
+        export_dir.mkdir(parents=True, exist_ok=True)
+        # Initialize mapping for updating XML locations
+        self._copy_map: Dict[str, Path] = {}
+        self.verbose(f"Copying files to {export_dir}")
+        self._copy_files(export_dir)
+        # Update XML Location attributes to point to copied files
+        self._update_locations(path, export_dir)
 
-            # Add PRODUCT element
-            if verbose:
-                self.console.log("Adding PRODUCT information...")
-            progress.update(export_task, advance=1)
-
-            # Add tracks to COLLECTION
-            if verbose:
-                self.console.log("Adding COLLECTION (tracks)...")
-            self._add_tracks_to_collection(xml, progress, verbose)
-            progress.update(export_task, advance=1)
-
-            # Add playlists
-            if verbose:
-                self.console.log("Adding PLAYLISTS...")
-            self._add_playlists(xml, progress, verbose)
-            progress.update(export_task, advance=1)
-
-            # Write to file
-            if verbose:
-                self.console.log(f"Writing XML to {output_path}...")
-            xml.save(output_path)
-            progress.update(export_task, advance=1)
-
-    def _add_tracks_to_collection(self, xml, progress, verbose: bool) -> None:
+    def _add_tracks_to_collection(self, xml) -> None:
         """Add all tracks to the XML collection."""
-        # search_content のみを使用
-        tracks = []
-        try:
-            tracks = self.db.search_content("")
-        except Exception as e:
-            if self.console:
-                self.console.log(f"[yellow]Warning: Failed to get tracks: {e}[/yellow]")
+        tracks = self.db.get_content()
 
-        added_tracks = 0
-        failed_tracks = 0
-        track_task = None
-        if progress:
-            track_task = progress.add_task("Tracks", total=len(tracks))
+        # uniq tracks
+        tracks = list({track.FolderPath: track for track in tracks}.values())
 
-        for track in tracks:
-            location = self._get_track_file_path(track)
-            if location is None or location == "":
-                # Location未設定のトラックはXML出力対象外
-                continue
-            success = self._add_track_to_xml(xml, track)
-            if success:
-                added_tracks += 1
-            else:
-                failed_tracks += 1
-
-            if track_task:
-                progress.update(track_task, advance=1)
-
-        if verbose:
-            self.console.log(
-                f"Added {added_tracks} tracks to XML, {failed_tracks} tracks failed"
+        # filter tracks
+        # track.FolderPathが空かfile://localhost//Contentsで始まるトラックを除外
+        tracks = [
+            track
+            for track in tracks
+            if not (
+                track.FolderPath is None
+                or track.FolderPath == ""
+                or track.FolderPath.startswith("file://localhost//Contents")
             )
+        ]
 
-    def _get_track_file_path(self, track) -> str:
+        # If playlists specified, limit to selected tracks
+        if getattr(self, '_playlist_specs', None):
+            tracks = [track for track in tracks if track.ID in self._selected_track_ids]
+
+        # Add each track to the collection
+        for track in tracks:
+            self.verbose(f"Processing track: {track}")
+            self._add_track_to_xml(xml, track)
+
+    def _romanize(self, value: str) -> str:
         """
-        トラックオブジェクトからファイルの絶対パスまたはURLを生成する。
+        ローマ字変換（有効時のみ）
+        ASCIIのみの場合は変換をスキップ
         """
-        folder_path = (
-            getattr(track, "FolderPath", "") if hasattr(track, "FolderPath") else ""
-        )
-        file_name = (
-            getattr(track, "FileNameL", "") if hasattr(track, "FileNameL") else ""
-        )
-        # dict型互換
-        if not folder_path and hasattr(track, "__getitem__") and "FolderPath" in track:
-            folder_path = track["FolderPath"]
-        if not file_name and hasattr(track, "__getitem__") and "FileNameL" in track:
-            file_name = track["FileNameL"]
-        if folder_path and file_name:
-            # 末尾重複防止
-            if folder_path.endswith(file_name):
-                path = folder_path
-            else:
-                # Use string concatenation instead of os.path.join to avoid scope issues
-                path = folder_path + "/" + file_name
-            return self._format_file_location(path)
-        # Location属性があれば使う
-        return ""
+        if not value:
+            return value
+        if value.isascii():
+            return value
+        if self._use_roman and self._roman_converter:
+            try:
+                return self._roman_converter.to_roman(value)
+            except Exception as e:
+                self.verbose(f"[WARN] romann変換失敗: {value}: {e}")
+                return value
+        return value
+
+    def _safe_bpm(self, val) -> Optional[float]:
+        """Convert raw BPM value to float BPM."""
+        try:
+            return float(val) / 100.0
+        except Exception:
+            return None
 
     def _add_track_to_xml(self, xml, track) -> bool:
         """
@@ -319,305 +179,49 @@ class RekordboxXMLExporter:
             xml: The RekordboxXml instance
             track: Track data from the database (DjmdContent object)
         """
-        # Extract track properties - handle both dict-like and object-like access
-        try:
-            # Try to access as an object with attributes
-            track_id = str(getattr(track, "ID", ""))
+        # Prepare track attributes
+        track_attrs = {}
+        # 既存の属性ループ
+        # まずAverageBpmをtrack_attrsに格納
+        avg_bpm_val = self._safe_bpm(getattr(track, 'BPM', None))
+        track_attrs = {}
+        track_attrs["AverageBpm"] = "{:.2f}".format(avg_bpm_val) if avg_bpm_val is not None else ""
 
-            # ファイルパス生成を専用メソッドに委譲
-            location = self._get_track_file_path(track)
-
-            # Prepare track attributes
-            track_attrs = {}
-            # まずBPM値を明示的に処理し、AverageBpmにセット
-            bpm_raw = None
-            if hasattr(track, "BPM"):
-                bpm_raw = getattr(track, "BPM")
-            elif hasattr(track, "__getitem__") and "BPM" in track:
-                bpm_raw = track["BPM"]
-            if bpm_raw is not None:
-                try:
-                    bpm_value = float(bpm_raw) / 100.0
-                    track_attrs["AverageBpm"] = "{:.2f}".format(bpm_value)
-                except (ValueError, TypeError):
-                    track_attrs["AverageBpm"] = str(bpm_raw)
-            # 既存の属性ループ
-            for db_field, xml_attr in self._track_attribute_mapping().items():
-                # 'AverageBpm'は絶対に上書きしない
-                if xml_attr == "AverageBpm":
-                    continue
-                if hasattr(track, db_field):
-                    value = getattr(track, db_field)
-                    if value is not None:
-                        # Handle special cases
-                        if db_field in ["BPM", "bpm", "Bpm"]:
-                            value = str(value)
-                        else:
-                            value = str(value)
-
-                        # Handle special case for file location
-                        if db_field == "Location":
-                            value = self._format_file_location(value)
-                            location = (
-                                value  # Store formatted location for add_track method
-                            )
-                        track_attrs[xml_attr] = value
-        except Exception as attr_error:
-            # Fallback to dictionary access if attribute access fails
-            try:
-                # Try to get track_id and location using attribute access first
-                if hasattr(track, "ID"):
-                    track_id = str(getattr(track, "ID", ""))
-                else:
-                    # Try dictionary-like access if possible
-                    if hasattr(track, "__getitem__") and "ID" in track:
-                        track_id = str(track["ID"])
-                    else:
-                        track_id = ""
-
-                # Try to get folder path and file name for constructing location
-                folder_path = ""
-                file_name = ""
-
-                # Try attribute access first
-                if hasattr(track, "FolderPath"):
-                    folder_path = getattr(track, "FolderPath", "")
-                elif hasattr(track, "__getitem__") and "FolderPath" in track:
-                    folder_path = track["FolderPath"]
-
-                if hasattr(track, "FileNameL"):
-                    file_name = getattr(track, "FileNameL", "")
-                elif hasattr(track, "__getitem__") and "FileNameL" in track:
-                    file_name = track["FileNameL"]
-
-                # Construct location from folder path and file name if both exist
-                if folder_path and file_name:
-                    # Check if folder_path already contains the file_name to avoid duplication
-                    if folder_path.endswith(file_name):
-                        location = folder_path
-                    else:
-                        # Use string concatenation instead of os.path.join to avoid scope issues
-                        location = folder_path + "/" + file_name
-                else:
-                    # Fallback to direct Location attribute if available
-                    if hasattr(track, "Location"):
-                        location = getattr(track, "Location", "")
-                    elif hasattr(track, "__getitem__") and "Location" in track:
-                        location = track["Location"]
-                    else:
-                        location = ""
-
-                # Prepare track attributes
-                track_attrs = {}
-                for db_field, xml_attr in self._track_attribute_mapping().items():
-                    value = None
-
-                    # Try attribute access first
-                    if hasattr(track, db_field):
-                        value = getattr(track, db_field)
-                    # Then try dictionary-like access
-                    elif hasattr(track, "__getitem__") and db_field in track:
-                        value = track[db_field]
-
-                    if value is not None:
-                        # Handle special cases
-                        if db_field in [
-                            "BPM",
-                            "AverageBpm",
-                            "bpm",
-                            "average_bpm",
-                            "Bpm",
-                        ]:
-                            # BPM値はデータベースでは100倍で保存されているので、100で割って正しい値に変換
-                            try:
-                                bpm_value = float(value) / 100.0
-                                value = "{:.2f}".format(bpm_value)
-                            except (ValueError, TypeError):
-                                # 変換に失敗した場合は元の値を使用
-                                value = str(value)
-                        else:
-                            value = str(value)
-
-                        # Handle special case for file location
-                        if db_field == "Location":
-                            value = self._format_file_location(value)
-                            location = (
-                                value  # Store formatted location for add_track method
-                            )
-                        track_attrs[xml_attr] = value
-            except Exception as dict_error:
-                if self.console:
-                    self.console.log(
-                        f"[yellow]Warning: Could not process track: {str(dict_error)}[/yellow]"
-                    )
-                return False
-                # Add track to XML
-        try:
-            # Use pyrekordbox.rbxml's add_track method
-            track_id = track_attrs.get("TrackID", "")
-
-            # Make sure all required attributes are present
-            # Add missing attributes with default values if they're not in track_attrs
-            for attr in [
-                "Album",
-                "Artist",
-                "Composer",
-                "Genre",
-                "Grouping",
-                "Label",
-                "Mix",
-                "Remixer",
-                "Tonality",
-            ]:
-                if attr not in track_attrs:
-                    track_attrs[attr] = ""
-
-            # Ensure location is not empty to avoid duplicate track errors
-            if not location or location == "file://localhost/":
-                # Generate a unique location based on track ID if the actual location is empty
-                # Don't add file://localhost/ prefix as pyrekordbox will add it automatically
-                location = f"unknown_location_{track_id}.mp3"
-
-            # Remove Location from track_attrs if it exists, since we'll pass it as a separate parameter
-            if "Location" in track_attrs:
-                del track_attrs["Location"]
-
-            # Add track to XML
-            try:
-                xml_track = xml.add_track(location, **track_attrs)
-            except Exception as add_error:
-                # If adding the track fails due to duplicate location, try with a modified location
-                if "already contains a track with Location" in str(add_error):
-                    # Modify the location to make it unique
-                    unique_location = f"{location}?id={track_id}"
+        # その後、他属性を処理
+        for db_field, xml_attr in self._track_attribute_mapping().items():
+            if xml_attr == "AverageBpm":
+                continue  # すでに格納済み
+            value = (getattr(track, db_field) or "") if hasattr(track, db_field) else ""
+            # ローマ字変換
+            if xml_attr == "Name":
+                value = str(value) if value is not None else ""
+                value = self._romanize(value)
+                # --bpm有効時はタイトル先頭にBPM整数値を付与（AverageBpmを利用）
+                if self._use_bpm:
+                    avg_bpm = track_attrs.get("AverageBpm")
                     try:
-                        xml_track = xml.add_track(unique_location, **track_attrs)
-                    except Exception as retry_error:
-                        if self.console:
-                            self.console.log(
-                                f"[yellow]Warning: Could not add track {track_id} even with unique location: {str(retry_error)}[/yellow]"
-                            )
-                        return False
-                else:
-                    if self.console:
-                        self.console.log(
-                            f"[yellow]Warning: Could not add track {track_id}: {str(add_error)}[/yellow]"
-                        )
-                    return False
+                        bpm_float = float(avg_bpm) if avg_bpm else 0.0
+                        bpm_int = int(bpm_float) if bpm_float > 0 else None
+                    except Exception:
+                        bpm_int = None
+                    if bpm_int is not None:
+                        old_value = value
+                        value = f"{bpm_int} {value}"
+                        if self._verbose:
+                            print(f"[BPM TITLE] {old_value} → {value} (AverageBpm={avg_bpm})")
+            elif xml_attr in ("Artist", "Album"):
+                value = str(value) if value is not None else ""
+                value = self._romanize(value)
+            if value is not None:
+                track_attrs[xml_attr] = value
 
-            # Get the raw XML document to add markers directly
-            # This is a workaround since we can't access the XML elements directly through the API
-            try:
-                # Try to access the XML document
-                xml_doc = None
-
-                # Try different ways to access the XML document
-                if hasattr(xml, "to_xml_string"):
-                    # Save to a temporary file and parse it back
-                    import tempfile
-
-                    with tempfile.NamedTemporaryFile(
-                        suffix=".xml", delete=False
-                    ) as temp_file:
-                        temp_path = temp_file.name
-
-                    # Save current state to temp file
-                    xml.save(temp_path)
-
-                    # Parse the XML file
-                    xml_doc = etree.parse(temp_path)
-
-                    # Find the track element by ID
-                    track_elem = None
-                    for elem in xml_doc.findall(".//TRACK"):
-                        if elem.get("TrackID") == track_id:
-                            track_elem = elem
-                            break
-
-                    if track_elem is not None:
-                        # Add BPM information as TEMPO marker
-                        bpm = None
-                        if hasattr(track, "BPM"):
-                            bpm = getattr(track, "BPM")
-                        elif "BPM" in track_attrs:
-                            bpm = track_attrs["BPM"]
-                        elif "AverageBpm" in track_attrs:
-                            bpm = track_attrs["AverageBpm"]
-
-                        if bpm and float(bpm) > 0:
-                            # Create a TEMPO element
-                            etree.SubElement(
-                                track_elem,
-                                "TEMPO",
-                                Inizio="0.025",  # Standard start position
-                                Bpm=f"{float(bpm):.2f}",
-                                Metro="4/4",  # Default time signature
-                                Battito="1",  # Default beat
-                            )
-
-                        # Add cue points as POSITION_MARK elements
-                        if hasattr(track, "Cues") and getattr(track, "Cues"):
-                            cues = getattr(track, "Cues")
-                            for i, cue in enumerate(cues):
-                                # Create a POSITION_MARK element
-                                pos_elem = etree.SubElement(
-                                    track_elem,
-                                    "POSITION_MARK",
-                                    Name=getattr(cue, "Name", f"Cue {i+1}"),
-                                    Type=str(getattr(cue, "Type", "0")),
-                                    Start=str(getattr(cue, "Position", "0.0")),
-                                    Num=str(i),
-                                )
-                                # Add color if available
-                                if hasattr(cue, "Color"):
-                                    pos_elem.set(
-                                        "Red",
-                                        str(getattr(cue, "Color", {}).get("Red", "0")),
-                                    )
-                                    pos_elem.set(
-                                        "Green",
-                                        str(
-                                            getattr(cue, "Color", {}).get("Green", "0")
-                                        ),
-                                    )
-                                    pos_elem.set(
-                                        "Blue",
-                                        str(getattr(cue, "Color", {}).get("Blue", "0")),
-                                    )
-
-                    # Save the modified XML back
-                    xml_doc.write(temp_path)
-
-                    # Load the modified XML back into the pyrekordbox object
-                    # This is a hack, but it's the only way to modify the XML directly
-                    xml = pyrekordbox.rbxml.RekordboxXml.parse_file(temp_path)
-
-                    # Clean up the temporary file
-                    import os
-
-                    os.unlink(temp_path)
-            except Exception as xml_error:
-                if self.console:
-                    self.console.log(
-                        f"[yellow]Warning: Could not add markers for track {track_id}: {str(xml_error)}[/yellow]"
-                    )
-            except Exception as marker_error:
-                # Don't fail the whole track if we can't add markers
-                if self.console:
-                    self.console.log(
-                        f"[yellow]Warning: Could not add markers for track {track_id}: {str(marker_error)}[/yellow]"
-                    )
-                # Continue with the track even if markers failed
-                pass
-
-            # Track was successfully added
-            return True
-        except Exception as e:
-            if self.console:
-                self.console.log(
-                    f"[yellow]Warning: Could not add track {track_id}: {str(e)}[/yellow]"
-                )
-            return False
+        self.verbose(f"Adding track: {track}")
+        # Add track element and attach TEMPO child
+        track_elem = xml.add_track(track.FolderPath, **track_attrs)
+        bpm_str = track_attrs.get("AverageBpm")
+        if bpm_str:
+            track_elem.add_tempo(Inizio="0.000", Bpm=bpm_str, Metro="4/4", Battito="1")
+        return True
 
     def _track_attribute_mapping(self) -> Dict[str, str]:
         """
@@ -628,7 +232,7 @@ class RekordboxXMLExporter:
         """
         # Mapping based on PyRekordbox's actual API
         # We handle different possible field names in the database
-        main_mapping = {
+        return {
             "ID": "TrackID",
             "Title": "Name",
             "Artist": "Artist",
@@ -645,11 +249,8 @@ class RekordboxXMLExporter:
             "FileSize": "Size",  # DjmdContent attribute
             "Size": "Size",
             "Length": "TotalTime",  # DjmdContent attribute
-            "TotalTime": "TotalTime",
             "DiscNo": "DiscNumber",  # DjmdContent attribute
-            "DiscNumber": "DiscNumber",
             "TrackNo": "TrackNumber",  # DjmdContent attribute
-            "TrackNumber": "TrackNumber",
             "ReleaseYear": "Year",  # DjmdContent attribute
             "Year": "Year",
             "BPM": "AverageBpm",  # DjmdContent attribute
@@ -664,7 +265,6 @@ class RekordboxXMLExporter:
             "DJPlayCount": "PlayCount",  # DjmdContent attribute
             "PlayCount": "PlayCount",
             "Rating": "Rating",
-            "Location": "Location",
             "Remixer": "Remixer",
             "RemixerName": "Remixer",  # DjmdContent attribute
             "KeyName": "Tonality",  # DjmdContent attribute
@@ -674,627 +274,243 @@ class RekordboxXMLExporter:
             "Mix": "Mix",
         }
 
-        # Alternative field names that might be used in pyrekordbox
-        alternative_mappings = {
-            # ID variations
-            "id": "TrackID",
-            "Id": "TrackID",
-            "track_id": "TrackID",
-            "TrackId": "TrackID",
-            # Title variations
-            "title": "Name",
-            "name": "Name",
-            "track_title": "Name",
-            # Artist variations
-            "artist": "Artist",
-            "artist_name": "Artist",
-            # BPM variations
-            "bpm": "AverageBpm",
-            "average_bpm": "AverageBpm",
-            "Bpm": "AverageBpm",
-            # Date variations
-            "date_added": "DateAdded",
-            "added_date": "DateAdded",
-            "added_at": "DateAdded",
-            # Path/location variations
-            "location": "Location",
-            "path": "Location",
-            "file_path": "Location",
-            "FilePath": "Location",
-            # File variations
-            "file_size": "Size",
-            "filesize": "Size",
-            # Time variations
-            "duration": "TotalTime",
-            "length": "TotalTime",
-            "time": "TotalTime",
-            # Misc variations
-            "comment": "Comments",
-            "play_count": "PlayCount",
-            "key": "Tonality",
-            "musical_key": "Tonality",
-            "disc_no": "DiscNumber",
-            "track_no": "TrackNumber",
-        }
-
-        # Merge dictionaries, with main_mapping taking precedence
-        return {**alternative_mappings, **main_mapping}
-
-    def _format_file_location(self, path: str) -> str:
-        """
-        Format file path as Rekordbox XML expects (always file:///... URL, cross-platform).
-        Args:
-            path: File path from the database
-        Returns:
-            Formatted file URL (file:///...)
-        """
-        import os
-        import urllib.parse
-
-        if not path:
-            return ""
-        # On Windows, strip any file:// scheme and return normalized path
-        if os.name == "nt":
-            p = path
-            # Remove file:// or file:/// prefix if present
-            if p.startswith("file://"): p = p[len("file://"):]
-            # Remove leading slash
-            if p.startswith("/"): p = p[1:]
-            return p.replace("\\", "/")
-        # Non-Windows: prefix file://
-        abs_path = os.path.abspath(path).replace("\\", "/")
-        url = "file://" + abs_path
-        return urllib.parse.quote(url, safe=":/")
-
-    def _add_tempo_markers(self, track_elem: etree.Element, track: Dict) -> None:
-        """
-        Add TEMPO elements to a track.
-
-        Args:
-            track_elem: The TRACK element to add the tempo markers to
-            track: Track data from the database
-        """
-        track_id = track.get("ID")
-        tempo_markers = None
-        try:
-            tempo_markers = self.db.get_beatgrid(track_id)
-        except Exception as e:
-            if self.console:
-                self.console.log(
-                    f"[yellow]Warning: Failed to get beatgrid for track {track_id}: {e}[/yellow]"
-                )
-        # Add TEMPO elements if we have tempo markers
-        if tempo_markers:
-            for marker in tempo_markers:
-                bpm_value = marker.get("bpm", marker.get("Bpm", 0.0))
-                if bpm_value:
-                    bpm_formatted = f"{float(bpm_value):.2f}"
-                else:
-                    bpm_formatted = "0.00"
-
-                # Get time signature
-                numerator = marker.get("meter_numerator", 4)
-                denominator = marker.get("meter_denominator", 4)
-
-                # Add TEMPO element
-                etree.SubElement(
-                    track_elem,
-                    "TEMPO",
-                    Inizio=str(marker.get("position", "0.0")),
-                    Bpm=bpm_formatted,
-                    Metro=f"{numerator}/{denominator}",
-                    Battito=str(marker.get("beat_number", 1)),
-                )
-
-    def _add_position_markers(self, track_elem: etree.Element, track: Dict) -> None:
-        """
-        Add POSITION_MARK elements to a track.
-
-        Args:
-            track_elem: The TRACK element to add the position markers to
-            track: Track data from the database
-        """
-        track_id = track.get("ID")
-        cue_points = None
-        try:
-            cue_points = self.db.get_memory_cues(track_id)
-        except Exception as e:
-            if self.console:
-                self.console.log(
-                    f"[yellow]Warning: Failed to get memory cues for track {track_id}: {e}[/yellow]"
-                )
-        # Add position mark elements if we have cue points
-        if cue_points:
-            for cue in cue_points:
-                attrs = {
-                    "Name": str(cue.get("name", "")),
-                    "Type": str(cue.get("type", "0")),
-                    "Start": str(cue.get("position", "0.0")),
-                    "Num": str(cue.get("hot_cue_number", "-1")),
-                }
-
-                # Add color information if available
-                if "color_id" in cue:
-                    color_id = cue.get("color_id")
-                    # Map color_id to RGB values based on Rekordbox color system
-                    # This is a simplified mapping and might need adjustment
-                    colors = {
-                        1: (255, 0, 0),  # Red
-                        2: (0, 255, 0),  # Green
-                        3: (0, 0, 255),  # Blue
-                        4: (255, 255, 0),  # Yellow
-                        5: (255, 0, 255),  # Magenta
-                        6: (0, 255, 255),  # Cyan
-                        7: (255, 165, 0),  # Orange
-                        8: (128, 0, 128),  # Purple
-                    }
-                    if color_id in colors:
-                        (
-                            attrs["Red"],
-                            attrs["Green"],
-                            attrs["Blue"],
-                        ) = colors[color_id]
-                etree.SubElement(track_elem, "POSITION_MARK", **attrs)
-
-    def _add_playlists(self, xml, progress, verbose: bool) -> None:
+    def _add_playlists(self, xml) -> None:
         """
         Add playlists to the XML.
 
+        ツリー構造を分析してからXMLに出力する
+        ID=0のプレイリストはルートフォルダ
+
         Args:
             xml: The RekordboxXml instance
-            progress: Progress instance for reporting
-            verbose: Whether to show verbose output
         """
-        # get_playlist のみを使用
-        playlists = []
-        try:
-            playlists = self.db.get_playlist()
-        except Exception as e:
-            if self.console:
-                self.console.log(f"[yellow]Warning: Failed to get playlists: {e}[/yellow]")
-        # is_folder属性で分離（dict型ではなく属性アクセスに修正）
-        playlist_folders = [p for p in playlists if getattr(p, "is_folder", False)]
-        regular_playlists = [p for p in playlists if not getattr(p, "is_folder", False)]
-        root_node = xml._root
-        for folder in playlist_folders:
-            self._add_folder_to_node(root_node, folder)
-        for playlist in regular_playlists:
-            if not getattr(playlist, "ParentId", None):
-                self._add_playlist_to_node(root_node, playlist)
 
-        # Convert DjmdContent objects to dictionaries if needed
-        normalized_folders = []
-        for folder in playlist_folders:
-            folder_dict = {}
+        all_playlists = self.db.get_playlist().all()
+        # Filter playlists if specs provided (include descendants & ancestors)
+        if self._playlist_specs:
+            orig_playlists = all_playlists
+            id_map = {pl.ID: pl for pl in orig_playlists}
+            # Build full path for each playlist
+            path_map: Dict[Any, str] = {}
+            for pl in orig_playlists:
+                parts = [pl.Name]
+                pid = pl.ParentID
+                while pid in id_map:
+                    parent = id_map[pid]
+                    parts.insert(0, parent.Name)
+                    pid = parent.ParentID
+                path_map[pl.ID] = "/".join(parts)
+            # Determine initial target IDs from specs
+            target_ids = set()
+            matched_specs = set()
+            for spec in self._playlist_specs:
+                if spec.isdigit():
+                    sid = int(spec)
+                    if sid in id_map:
+                        target_ids.add(sid)
+                        matched_specs.add(spec)
+                else:
+                    for pid, ppath in path_map.items():
+                        if ppath == spec:
+                            target_ids.add(pid)
+                            matched_specs.add(spec)
+            # 無効な指定をエラーとする
+            unmatched = [spec for spec in self._playlist_specs if spec not in matched_specs]
+            if unmatched:
+                raise ValueError(f"Invalid playlist spec(s): {', '.join(unmatched)}")
+            # Build parent->children map
+            parent_map: Dict[Any, List] = {}
+            for pl in orig_playlists:
+                parent_map.setdefault(pl.ParentID, []).append(pl)
+            # Collect include IDs (descendants and ancestors)
+            include_ids = set()
+            def collect_desc(pid):
+                include_ids.add(pid)
+                for child in parent_map.get(pid, []):
+                    collect_desc(child.ID)
+            for tid in target_ids:
+                collect_desc(tid)
+            # Include ancestor folders
+            for pid in list(include_ids):
+                curr = id_map.get(pid)
+                while curr:
+                    include_ids.add(curr.ID)
+                    curr = id_map.get(curr.ParentID)
+            all_playlists = [pl for pl in orig_playlists if pl.ID in include_ids]
 
-            # Handle both dictionary and object access
-            try:
-                # Try object attribute access first
-                if hasattr(folder, "ID"):
-                    folder_dict["Id"] = getattr(folder, "ID")
-                elif hasattr(folder, "Id"):
-                    folder_dict["Id"] = getattr(folder, "Id")
+        db_root = DjmdPlaylist()
+        db_root.ID = "root"
+        db_root.Name = "root"
+        root = xml._root_node
 
-                if hasattr(folder, "ParentID"):
-                    folder_dict["ParentId"] = getattr(folder, "ParentID")
-                elif hasattr(folder, "ParentId"):
-                    folder_dict["ParentId"] = getattr(folder, "ParentId")
+        # db/xml playlist pair list
+        db_xml_playlist_tuple_cue = [(db_root, root)]
 
-                if hasattr(folder, "Name"):
-                    folder_dict["Name"] = getattr(folder, "Name")
+        # find child folders, add to child, and remove them from all_playlists
+        while db_xml_playlist_tuple_cue:
+            parent, parent_xml = db_xml_playlist_tuple_cue[-1]
+            # 親IDが一致する子ノードをすべて抽出
+            children = [pl for pl in all_playlists if pl.ParentID == parent.ID]
+            if not children:
+                db_xml_playlist_tuple_cue.pop()
+                continue
+            for child in children:
+                self.verbose(f"adding playlist: {child} (parent: {parent.ID})")
+                if child.is_folder:
+                    child_xml = parent_xml.add_playlist_folder(self._romanize(child.Name))
+                    db_xml_playlist_tuple_cue.append((child, child_xml))
+                elif child.is_playlist:
+                    pl_xml = parent_xml.add_playlist(self._romanize(child.Name))
+                    self._add_playlists_to_playlist(pl_xml, child)
+                all_playlists.remove(child)
 
-                # If we couldn't get the required fields, try dictionary access
-                if "Id" not in folder_dict:
-                    # Try dictionary access for various field names
-                    for id_field in ["Id", "id", "ID", "folder_id"]:
-                        if hasattr(folder, "__getitem__") and id_field in folder:
-                            folder_dict["Id"] = folder[id_field]
-                            break
-
-                if "ParentId" not in folder_dict:
-                    for parent_field in ["ParentId", "parent_id", "parentId", "parent"]:
-                        if hasattr(folder, "__getitem__") and parent_field in folder:
-                            folder_dict["ParentId"] = folder[parent_field]
-                            break
-
-                if "Name" not in folder_dict:
-                    if hasattr(folder, "__getitem__") and "Name" in folder:
-                        folder_dict["Name"] = folder["Name"]
-                    elif hasattr(folder, "__getitem__") and "name" in folder:
-                        folder_dict["Name"] = folder["name"]
-
-                # Default values if still missing
-                if "Id" not in folder_dict:
-                    continue  # Skip folders without ID
-
-                if "ParentId" not in folder_dict:
-                    folder_dict["ParentId"] = 0
-
-                if "Name" not in folder_dict:
-                    folder_dict["Name"] = "Unnamed Folder"
-
-                normalized_folders.append(folder_dict)
-            except Exception as e:
-                if self.console:
-                    self.console.log(
-                        f"[yellow]Warning: Could not process folder: {str(e)}[/yellow]"
-                    )
-
-        # Normalize playlist objects
-        normalized_playlists = []
-        for playlist in regular_playlists:
-            playlist_dict = {}
-
-            # Handle both dictionary and object access
-            try:
-                # Try object attribute access first
-                if hasattr(playlist, "ID"):
-                    playlist_dict["Id"] = getattr(playlist, "ID")
-                elif hasattr(playlist, "Id"):
-                    playlist_dict["Id"] = getattr(playlist, "Id")
-
-                if hasattr(playlist, "ParentID"):
-                    playlist_dict["ParentId"] = getattr(playlist, "ParentID")
-                elif hasattr(playlist, "ParentId"):
-                    playlist_dict["ParentId"] = getattr(playlist, "ParentId")
-
-                if hasattr(playlist, "Name"):
-                    playlist_dict["Name"] = getattr(playlist, "Name")
-
-                # If we couldn't get the required fields, try dictionary access
-                if "Id" not in playlist_dict:
-                    # Try dictionary access for various field names
-                    for id_field in ["Id", "id", "ID", "playlist_id"]:
-                        if hasattr(playlist, "__getitem__") and id_field in playlist:
-                            playlist_dict["Id"] = playlist[id_field]
-                            break
-
-                if "ParentId" not in playlist_dict:
-                    for parent_field in ["ParentId", "parent_id", "parentId", "parent"]:
-                        if (
-                            hasattr(playlist, "__getitem__")
-                            and parent_field in playlist
-                        ):
-                            playlist_dict["ParentId"] = playlist[parent_field]
-                            break
-
-                if "Name" not in playlist_dict:
-                    if hasattr(playlist, "__getitem__") and "Name" in playlist:
-                        playlist_dict["Name"] = playlist["Name"]
-                    elif hasattr(playlist, "__getitem__") and "name" in playlist:
-                        playlist_dict["Name"] = playlist["name"]
-
-                # Default values if still missing
-                if "Id" not in playlist_dict:
-                    continue  # Skip playlists without ID
-
-                if "ParentId" not in playlist_dict:
-                    playlist_dict["ParentId"] = 0
-
-                if "Name" not in playlist_dict:
-                    playlist_dict["Name"] = "Unnamed Playlist"
-
-                normalized_playlists.append(playlist_dict)
-            except Exception as e:
-                if self.console:
-                    self.console.log(
-                        f"[yellow]Warning: Could not process playlist: {str(e)}[/yellow]"
-                    )
-
-        if verbose:
-            self.console.log(
-                f"Found {len(normalized_playlists)} playlists and {len(normalized_folders)} folders"
-            )
-            playlist_task = progress.add_task(
-                "Processing playlists...",
-                total=len(normalized_playlists) + len(normalized_folders),
-            )
-        else:
-            playlist_task = None
-
-        # Process folders and playlists using pyrekordbox.rbxml API
-        folder_map = {
-            0: xml.root_playlist_folder
-        }  # Map folder IDs to Node objects, 0 is ROOT
-
-        # First add all folders
-        for folder in sorted(normalized_folders, key=lambda f: f.get("ParentId", 0)):
-            try:
-                folder_id = folder.get("Id")
-                parent_id = folder.get("ParentId", 0)
-                folder_name = folder.get("Name", "Unnamed Folder")
-
-                # Get parent node
-                parent_node = folder_map.get(parent_id)
-                if parent_node is None:
-                    # If parent not found, add to root
-                    parent_node = xml.root_playlist_folder
-
-                # Add folder
-                folder_node = parent_node.add_playlist_folder(folder_name)
-                folder_map[folder_id] = folder_node
-
-                if verbose and playlist_task:
-                    progress.update(playlist_task, advance=1)
-            except Exception as e:
-                if self.console:
-                    self.console.log(
-                        f"[yellow]Warning: Could not add folder {folder.get('Name')}: {str(e)}[/yellow]"
-                    )
-
-        # Add playlists
-        for playlist in normalized_playlists:
-            try:
-                playlist_id = playlist.get("Id")
-                parent_id = playlist.get("ParentId", 0)
-                playlist_name = playlist.get("Name", "Unnamed Playlist")
-
-                # Get parent node
-                parent_node = folder_map.get(parent_id)
-                if parent_node is None:
-                    # If parent not found, add to root
-                    parent_node = xml.root_playlist_folder
-
-                # Add playlist
-                playlist_node = parent_node.add_playlist(playlist_name)
-
-                # Add tracks to playlist
-                self._add_tracks_to_playlist(xml, playlist_node, playlist_id)
-
-                if verbose and playlist_task:
-                    progress.update(playlist_task, advance=1)
-            except Exception as e:
-                if self.console:
-                    self.console.log(
-                        f"[yellow]Warning: Could not add playlist {playlist.get('Name')}: {str(e)}[/yellow]"
-                    )
-
-    def _add_tracks_to_playlist(self, xml, playlist_node, playlist_id) -> None:
+    def _add_playlists_to_playlist(self, playlist_node, playlist) -> None:
         """
         Add tracks to a playlist.
 
         Args:
-            xml: The RekordboxXml instance
             playlist_node: The playlist node to add tracks to
-            playlist_id: ID of the playlist to get tracks for
+            playlist: The playlist to get tracks for
         """
         # Get tracks in playlist
-        playlist_entries = []
+        playlist_entries = self.db.get_playlist_contents(playlist).all()
 
-        # SQLクエリを使用してプレイリスト内の曲情報を取得
-        try:
-            if hasattr(self.db, "engine"):
-                with self.db.engine.connect() as conn:
-                    # プレイリスト内の曲を取得
-                    query = text(
-                        f"SELECT ContentID, TrackNo FROM djmdSongPlaylist WHERE PlaylistID = :playlist_id ORDER BY TrackNo"
-                    )
-                    entries = conn.execute(
-                        query, {"playlist_id": playlist_id}
-                    ).fetchall()
-
-                    for entry in entries:
-                        entry_dict = {"TrackID": entry[0], "TrackNo": entry[1]}
-                        playlist_entries.append(entry_dict)
-
-                    if self.console and len(playlist_entries) > 0:
-                        self.console.log(
-                            f"[green]Found {len(playlist_entries)} tracks in playlist {playlist_id} using SQL query[/green]"
-                        )
-            else:
-                # 従来のメソッドを試す（フォールバック）
-                if hasattr(self.db, "get_playlist_entries"):
-                    playlist_entries = self.db.get_playlist_entries(playlist_id)
-                elif hasattr(self.db, "get_playlist_songs"):
-                    playlist_entries = self.db.get_playlist_songs(playlist_id)
-                elif hasattr(self.db, "get_playlist_contents"):
-                    playlist_entries = self.db.get_playlist_contents(playlist_id)
-        except Exception as e:
-            if self.console:
-                self.console.log(
-                    f"[yellow]Warning: Failed to get playlist entries using SQL: {e}[/yellow]"
-                )
-
-            # 従来のメソッドを試す（フォールバック）
-            try:
-                if hasattr(self.db, "get_playlist_entries"):
-                    playlist_entries = self.db.get_playlist_entries(playlist_id)
-                elif hasattr(self.db, "get_playlist_songs"):
-                    playlist_entries = self.db.get_playlist_songs(playlist_id)
-                elif hasattr(self.db, "get_playlist_contents"):
-                    playlist_entries = self.db.get_playlist_contents(playlist_id)
-            except Exception as e2:
-                if self.console:
-                    self.console.log(
-                        f"[yellow]Warning: Failed to get playlist entries using fallback methods: {e2}[/yellow]"
-                    )
+        # --orderby=bpm オプション対応
+        if getattr(self, '_orderby', 'default') == 'bpm':
+            def safe_bpm(entry):
+                bpm = entry.BPM
+                if not bpm:
+                    return 0
+                return bpm
+            playlist_entries = sorted(playlist_entries, key=safe_bpm)
 
         # Normalize playlist entries
-        normalized_entries = []
-        for track_entry in playlist_entries:
-            entry_dict = {}
-
-            # Try to get track ID from object attributes first
-            try:
-                if hasattr(track_entry, "ContentID"):
-                    entry_dict["TrackID"] = getattr(track_entry, "ContentID")
-                elif hasattr(track_entry, "ID"):
-                    entry_dict["TrackID"] = getattr(track_entry, "ID")
-                elif hasattr(track_entry, "TrackID"):
-                    entry_dict["TrackID"] = getattr(track_entry, "TrackID")
-
-                # If we couldn't get the required fields, try dictionary access
-                if "TrackID" not in entry_dict:
-                    # Try dictionary access for various field names
-                    for field in [
-                        "TrackID",
-                        "track_id",
-                        "ID",
-                        "id",
-                        "ContentID",
-                        "content_id",
-                    ]:
-                        if hasattr(track_entry, "__getitem__") and field in track_entry:
-                            entry_dict["TrackID"] = track_entry[field]
-                            break
-
-                if "TrackID" in entry_dict:
-                    normalized_entries.append(entry_dict)
-            except Exception as e:
-                if self.console:
-                    self.console.log(
-                        f"[yellow]Warning: Could not process playlist entry: {str(e)}[/yellow]"
-                    )
-
-        # Add tracks to playlist
-        for entry in normalized_entries:
-            track_id = entry.get("TrackID")
-            if track_id:
-                try:
-                    # pyrekordbox 0.4.0のAPIでは、add_trackメソッドはtrack_idキーワード引数を受け付けない
-                    # 代わりにトラックIDを直接渡す
-                    playlist_node.add_track(str(track_id))
-                except Exception as e:
-                    # 別の方法を試す
-                    try:
-                        # XMLオブジェクトからトラックを取得して追加する
-                        track = xml.get_track(str(track_id))
-                        if track:
-                            playlist_node.add_track(track)
-                        else:
-                            # トラックIDを持つ要素を直接作成して追加
-                            track_elem = etree.Element("TRACK", KEY=str(track_id))
-                            playlist_node.append(track_elem)
-                    except Exception as e2:
-                        if self.console:
-                            self.console.log(
-                                f"[yellow]Warning: Could not add track {track_id} to playlist: {str(e)} / {str(e2)}[/yellow]"
-                            )
-
-    def _add_playlist_to_node(
-        self, parent_node: etree.Element, playlist: Dict
-    ) -> etree.Element:
-        """
-        Add a playlist as a NODE to a parent NODE.
-
-        Args:
-            parent_node: Parent NODE element
-            playlist: Playlist data from the database
-
-        Returns:
-            The created playlist NODE element
-        """
-        # Create playlist node
-        playlist_node = etree.SubElement(
-            parent_node,
-            "NODE",
-            Name=getattr(playlist, "Name", "Unnamed Playlist"),
-            Type="1",  # Playlist type
-            KeyType="0",  # Track ID type
-            Entries="0",  # Will update count later
-        )
-
-        # Get tracks in this playlist via Songs property
-        playlist_id = getattr(playlist, "Id", None)
-        entries = getattr(playlist, "Songs", [])
-
-        # Normalize by extracting ContentID
-        normalized_tracks = []
-        for song in entries:
-            cid = getattr(song, "ContentID", None)
-            if cid is not None:
-                normalized_tracks.append({"TrackId": cid})
-
-        # Add tracks to playlist
-        for track_entry in normalized_tracks:
-            track_id = track_entry.get("TrackId")
-            etree.SubElement(playlist_node, "TRACK", Key=str(track_id))
-
-        # Update entries count
-        playlist_node.set("Entries", str(len(normalized_tracks)))
-
-        return playlist_node
-
-    def _add_folder_to_node(
-        self, parent_node: etree.Element, folder: Dict
-    ) -> etree.Element:
-        """
-        Add a folder as a NODE to a parent NODE.
-
-        Args:
-            parent_node: Parent NODE element
-            folder: Folder data from the database
-
-        Returns:
-            The created folder NODE element
-        """
-        # Create folder node
-        folder_node = etree.SubElement(
-            parent_node,
-            "NODE",
-            Name=getattr(folder, "Name", "Unnamed Folder"),
-            Type="0",  # Folder type
-            Count="0",  # Will update count later
-        )
-
-        return folder_node
-
-    def _add_subfolders_recursively(
-        self,
-        parent_node: etree.Element,
-        parent_folder: Dict,
-        all_folders: List[Dict],
-        all_playlists: List[Dict],
-    ) -> None:
-        """
-        Recursively add subfolders and their contents to a parent folder.
-
-        Args:
-            parent_node: Parent NODE element
-            parent_folder: Parent folder data
-            all_folders: List of all folder data
-            all_playlists: List of all playlist data
-        """
-        parent_id = getattr(parent_folder, "Id", None)
-
-        # Find subfolders of this parent
-        subfolders = [f for f in all_folders if getattr(f, "ParentId", None) == parent_id]
-
-        # Find playlists directly in this folder
-        folder_playlists = [p for p in all_playlists if getattr(p, "ParentId", None) == parent_id]
-
-        # Update count
-        parent_node.set("Count", str(len(subfolders) + len(folder_playlists)))
-
-        # Add each subfolder
-        for subfolder in subfolders:
-            subfolder_node = self._add_folder_to_node(parent_node, subfolder)
-
-            # Recursively add contents to this subfolder
-            self._add_subfolders_recursively(
-                subfolder_node, subfolder, all_folders, all_playlists
-            )
-
-        # Add playlists directly in this folder
-        for playlist in folder_playlists:
-            self._add_playlist_to_node(parent_node, playlist)
+        for entry in playlist_entries:
+            playlist_node.add_track(entry.ID)
+            # Record track ID for collection filtering
+            self._selected_track_ids.add(entry.ID)
 
     def close(self) -> None:
         """Close the database connection when done."""
         # In version 0.4.0+ closing might not be necessary,
         # but we'll call it if the method exists
-        if hasattr(self.db, "close"):
-            try:
-                self.db.close()
-            except Exception:
-                pass  # Ignore errors when closing
+        self.db.close()
+
+    def _copy_files(self, export_dir: Path) -> None:
+        """
+        Copy selected track files to export directory, preserving home-relative paths.
+        """
+        # Flatten copy: use md5 of full path as filename and rewrite tags
+        for content in self.db.get_content().all():
+            if content.ID not in self._selected_track_ids:
+                continue
+            loc = getattr(content, 'FolderPath', None)
+            if not loc:
+                self.verbose("FolderPath missing, skipping")
+                continue
+            # Parse file:// URI or raw path
+            if "://" in loc:
+                parsed = urllib.parse.urlparse(loc)
+                path_str = urllib.parse.unquote(parsed.path)
+                if os.name == 'nt' and path_str.startswith('/'):
+                    path_str = path_str.lstrip('/')
+            else:
+                path_str = loc
+            orig = Path(path_str)
+            if not orig.exists():
+                self.verbose(f"Source file not found, skipping: {orig}")
+                continue
+            # MD5 hash as filename (no extension)
+            md5_hex = hashlib.md5(path_str.encode("utf-8")).hexdigest()
+            # 元ファイルの拡張子を保持
+            ext = orig.suffix
+            dest = export_dir / f"{md5_hex}{ext}"
+            
+            # コピー先があったらコピーしない。ただしタグは書き換えたいのでコピー処理だけ飛ばす。
+            if not dest.exists():
+                try:
+                    shutil.copy2(orig, dest)
+                except Exception as e:
+                    self.verbose(f"Copy failed: {orig} → {dest}: {e}")
+                    continue
+            # Record mapping from original path to copied file
+            self._copy_map[path_str] = dest
+            # Rewrite metadata tags using mutagen
+            title_val = getattr(content, 'Title', '') or ''
+            artist_val = getattr(content, 'ArtistName', '') or getattr(content, 'Artist', '') or ''
+            album_val = getattr(content, 'AlbumName', '') or getattr(content, 'Album', '') or ''
+            if self._use_roman:
+                title_val = self._romanize(title_val)
+                artist_val = self._romanize(artist_val)
+                album_val = self._romanize(album_val)
+            if self._use_bpm:
+                bpm_val = self._safe_bpm(getattr(content, 'BPM', None))
+                if bpm_val:
+                    title_val = f"{int(bpm_val)} {title_val}"
+            ext = dest.suffix.lower()
+            if ext == '.mp3':
+                try:
+                    audio = ID3(dest)
+                except mutagen.id3.ID3NoHeaderError:
+                    audio = ID3()
+                audio['TIT2'] = TIT2(encoding=3, text=title_val)
+                audio['TPE1'] = TPE1(encoding=3, text=artist_val)
+                audio['TALB'] = TALB(encoding=3, text=album_val)
+                audio.save(dest)
+            elif ext in ('.m4a', '.mp4'):
+                audio = MP4(dest)
+                if audio.tags is None:
+                    audio.add_tags()
+                audio.tags['\xa9nam'] = [title_val]
+                audio.tags['\xa9ART'] = [artist_val]
+                audio.tags['\xa9alb'] = [album_val]
+                audio.save()
+
+    def _update_locations(self, xml_path: str, export_dir: Path) -> None:
+        """
+        Update Location attributes in XML to URIs of copied files.
+        """
+        from lxml import etree
+        import urllib.parse as up
+        import os
+        # Parse XML file
+        tree = etree.parse(xml_path)
+        # Update each TRACK Location
+        for track in tree.findall(".//TRACK"):
+            loc = track.attrib.get("Location")
+            if not loc:
+                continue
+            # Extract raw filesystem path
+            if "://" in loc:
+                parsed = up.urlparse(loc)
+                raw = up.unquote(parsed.path)
+                if os.name == "nt" and raw.startswith("/"):
+                    raw = raw.lstrip("/")
+            else:
+                raw = loc
+            dest = self._copy_map.get(raw)
+            if dest:
+                # Build file URI with explicit localhost
+                uri = dest.resolve().as_uri()
+                parsed_uri = up.urlparse(uri)
+                if parsed_uri.scheme == "file" and not parsed_uri.netloc:
+                    parsed_uri = parsed_uri._replace(netloc="localhost")
+                    uri = up.urlunparse(parsed_uri)
+                track.attrib["Location"] = uri
+            # TEMPO added via Track.add_tempo; manual injection removed
+        # Write back updated XML
+        tree.write(xml_path, encoding="UTF-8", xml_declaration=True)
 
 
 def export_rekordbox_db_to_xml(
     db_path: Optional[str],
     output_path: str,
-    verbose: bool = False,
     db_key: Optional[str] = None,
+    verbose: bool = False,
+    roman: bool = False,
+    bpm: bool = False,
+    orderby: str = "default",
+    playlists: Optional[List[str]] = None,
 ) -> None:
     """
     Export a Rekordbox database to XML format.
@@ -1305,28 +521,16 @@ def export_rekordbox_db_to_xml(
         verbose: Show detailed output during export
         db_key: Rekordbox database key (optional, for newer Rekordbox versions)
     """
-    console = Console()
-    exporter = RekordboxXMLExporter(db_file_path=db_path, console=console, db_key=db_key)
+    exporter = RekordboxXMLExporter(
+        db_path,
+        db_key=db_key,
+        use_verbose=verbose,
+        use_roman=roman,
+        use_bpm=bpm,
+        orderby=orderby,
+        playlist_specs=playlists,
+    )
     try:
-        exporter.generate_xml(output_path, verbose)
+        exporter.generate_xml(output_path)
     finally:
         exporter.close()
-
-
-if __name__ == "__main__":
-    import sys
-
-    if len(sys.argv) == 3:
-        # With specified database
-        db_path = sys.argv[1]
-        output_path = sys.argv[2]
-        export_rekordbox_db_to_xml(db_path, output_path, verbose=True)
-    elif len(sys.argv) == 2:
-        # Auto-detect database
-        output_path = sys.argv[1]
-        export_rekordbox_db_to_xml(None, output_path, verbose=True)
-    else:
-        print("Usage:")
-        print("  python rkbdb2xml.py /path/to/output.xml")
-        print("  python rkbdb2xml.py /path/to/rekordbox.db /path/to/output.xml")
-        sys.exit(1)

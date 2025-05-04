@@ -1,0 +1,400 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<DJ_PLAYLISTS Version="1.0.0">
+  <PRODUCT Name="rekordbox" Version="6.8.0" Company="AlphaTheta"/>
+  <COLLECTION Entries="46">
+    <TRACK TrackID="33934509" Name="NOISE" Artist="" Composer="" Album=""
+           Grouping="" Genre="" Kind="WAV ファイル" Size="1382226" TotalTime="5"
+           DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="0.00" DateAdded="2025-04-12"
+           BitRate="2116" SampleRate="44100" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/OSC_SAMPLER/PRESET%20ONESHOT/NOISE.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="89882855" Name="SINEWAVE" Artist="" Composer="" Album=""
+           Grouping="" Genre="" Kind="WAV ファイル" Size="1515258" TotalTime="5"
+           DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="0.00" DateAdded="2025-04-12"
+           BitRate="2116" SampleRate="44100" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/OSC_SAMPLER/PRESET%20ONESHOT/SINEWAVE.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="174989033" Name="SIREN" Artist="" Composer="" Album=""
+           Grouping="" Genre="" Kind="WAV ファイル" Size="1941204" TotalTime="7"
+           DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="0.00" DateAdded="2025-04-12"
+           BitRate="2116" SampleRate="44100" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/OSC_SAMPLER/PRESET%20ONESHOT/SIREN.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="236835219" Name="HORN" Artist="" Composer="" Album=""
+           Grouping="" Genre="" Kind="WAV ファイル" Size="2010816" TotalTime="7"
+           DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="0.00" DateAdded="2025-04-12"
+           BitRate="2116" SampleRate="44100" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/OSC_SAMPLER/PRESET%20ONESHOT/HORN.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="192849009" Name="Demo Track 1" Artist="Loopmasters"
+           Composer="" Album="" Grouping="" Genre="" Kind="MP3 ファイル"
+           Size="6899624" TotalTime="172" DiscNumber="0" TrackNumber="0"
+           Year="0" AverageBpm="128.00" DateAdded="2025-04-12" BitRate="320"
+           SampleRate="44100" Comments="Tracks by www.loopmasters.com" PlayCount="0"
+           Rating="0" Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Demo%20Tracks/Demo%20Track%201.mp3"
+           Remixer="" Tonality="" Label="Loopmasters" Mix="">
+      <TEMPO Inizio="0.025" Bpm="128.00" Metro="4/4" Battito="1"/>
+    </TRACK>
+    <TRACK TrackID="243695501" Name="Demo Track 2" Artist="Loopmasters"
+           Composer="" Album="" Grouping="" Genre="" Kind="MP3 ファイル"
+           Size="5124342" TotalTime="128" DiscNumber="0" TrackNumber="0"
+           Year="0" AverageBpm="120.00" DateAdded="2025-04-12" BitRate="320"
+           SampleRate="44100" Comments="Tracks by www.loopmasters.com" PlayCount="0"
+           Rating="0" Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Demo%20Tracks/Demo%20Track%202.mp3"
+           Remixer="" Tonality="" Label="Loopmasters" Mix="">
+      <TEMPO Inizio="0.025" Bpm="120.00" Metro="4/4" Battito="1"/>
+      <TEMPO Inizio="48.026" Bpm="120.00" Metro="4/4" Battito="1"/>
+      <TEMPO Inizio="48.525" Bpm="120.00" Metro="4/4" Battito="2"/>
+      <TEMPO Inizio="49.026" Bpm="120.00" Metro="4/4" Battito="3"/>
+      <TEMPO Inizio="49.525" Bpm="120.00" Metro="4/4" Battito="4"/>
+      <TEMPO Inizio="50.026" Bpm="120.00" Metro="4/4" Battito="1"/>
+      <TEMPO Inizio="50.525" Bpm="120.00" Metro="4/4" Battito="2"/>
+      <TEMPO Inizio="51.026" Bpm="120.00" Metro="4/4" Battito="3"/>
+      <TEMPO Inizio="51.525" Bpm="120.00" Metro="4/4" Battito="4"/>
+      <TEMPO Inizio="52.026" Bpm="120.00" Metro="4/4" Battito="1"/>
+    </TRACK>
+    <TRACK TrackID="123755043" Name="CYMBAL" Artist="" Composer="" Album=""
+           Grouping="" Genre="" Kind="WAV ファイル" Size="543576" TotalTime="2"
+           DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="0.00" DateAdded="2025-04-12"
+           BitRate="2116" SampleRate="44100" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20104.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="4059978" Name="SHORT BOOM" Artist="Loopmasters" Composer=""
+           Album="" Grouping="" Genre="" Kind="WAV ファイル" Size="727752"
+           TotalTime="2" DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="0.00"
+           DateAdded="2025-04-12" BitRate="2116" SampleRate="44100" Comments=""
+           PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20304.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="145590936" Name="LET&apos;S GO" Artist="Loopmasters"
+           Composer="" Album="" Grouping="" Genre="" Kind="WAV ファイル"
+           Size="1002802" TotalTime="3" DiscNumber="0" TrackNumber="0" Year="0"
+           AverageBpm="0.00" DateAdded="2025-04-12" BitRate="2116" SampleRate="44100"
+           Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20305.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="35353565" Name="NEEDLE SCRATCH NOISE" Artist="" Composer=""
+           Album="" Grouping="" Genre="" Kind="WAV ファイル" Size="543590"
+           TotalTime="2" DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="0.00"
+           DateAdded="2025-04-12" BitRate="2116" SampleRate="44100" Comments=""
+           PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20301.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="69473764" Name="CLAP" Artist="" Composer="" Album=""
+           Grouping="" Genre="" Kind="WAV ファイル" Size="203884" TotalTime="0"
+           DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="0.00" DateAdded="2025-04-12"
+           BitRate="2116" SampleRate="44100" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20103.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="164419894" Name="SNARE8" Artist="" Composer="" Album=""
+           Grouping="" Genre="" Kind="WAV ファイル" Size="135948" TotalTime="0"
+           DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="0.00" DateAdded="2025-04-12"
+           BitRate="2116" SampleRate="44100" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20102.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="24250509" Name="HORN" Artist="" Composer="" Album=""
+           Grouping="" Genre="" Kind="WAV ファイル" Size="1621228" TotalTime="6"
+           DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="0.00" DateAdded="2025-04-12"
+           BitRate="2116" SampleRate="44100" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20302.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="184114952" Name="SNARE9" Artist="" Composer="" Album=""
+           Grouping="" Genre="" Kind="WAV ファイル" Size="186906" TotalTime="0"
+           DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="0.00" DateAdded="2025-04-12"
+           BitRate="2116" SampleRate="44100" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20101.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="243723727" Name="REWIND" Artist="" Composer="" Album=""
+           Grouping="" Genre="" Kind="WAV ファイル" Size="1494288" TotalTime="5"
+           DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="0.00" DateAdded="2025-04-12"
+           BitRate="2116" SampleRate="44100" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20303.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="68802604" Name="BOOM DOWN LIFTER2" Artist="Loopmasters"
+           Composer="" Album="" Grouping="" Genre="" Kind="WAV ファイル"
+           Size="1639462" TotalTime="9" DiscNumber="0" TrackNumber="0" Year="0"
+           AverageBpm="0.00" DateAdded="2025-04-12" BitRate="1411" SampleRate="44100"
+           Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20204.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="145362637" Name="NOISE DOWN LIFTER1" Artist="Loopmasters"
+           Composer="" Album="" Grouping="" Genre="" Kind="WAV ファイル"
+           Size="1297040" TotalTime="4" DiscNumber="0" TrackNumber="0" Year="0"
+           AverageBpm="0.00" DateAdded="2025-04-12" BitRate="2116" SampleRate="44100"
+           Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20205.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="267834963" Name="IMPACT KICK" Artist="Loopmasters" Composer=""
+           Album="" Grouping="" Genre="" Kind="WAV ファイル" Size="1459146"
+           TotalTime="5" DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="0.00"
+           DateAdded="2025-04-12" BitRate="2116" SampleRate="44100" Comments=""
+           PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20207.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="125397770" Name="NOISE DOWN LIFTER2" Artist="Loopmasters"
+           Composer="" Album="" Grouping="" Genre="" Kind="WAV ファイル"
+           Size="1378094" TotalTime="5" DiscNumber="0" TrackNumber="0" Year="0"
+           AverageBpm="0.00" DateAdded="2025-04-12" BitRate="2116" SampleRate="44100"
+           Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20206.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="69681963" Name="SNARE" Artist="Loopmasters" Composer=""
+           Album="" Grouping="" Genre="" Kind="WAV ファイル" Size="486444"
+           TotalTime="1" DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="0.00"
+           DateAdded="2025-04-12" BitRate="2116" SampleRate="44100" Comments=""
+           PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20202.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="117754230" Name="BOOM DOWN LIFTER1" Artist="Loopmasters"
+           Composer="" Album="" Grouping="" Genre="" Kind="WAV ファイル"
+           Size="1297038" TotalTime="4" DiscNumber="0" TrackNumber="0" Year="0"
+           AverageBpm="0.00" DateAdded="2025-04-12" BitRate="2116" SampleRate="44100"
+           Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20203.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="5977783" Name="CLASH CYMBAL" Artist="" Composer="" Album=""
+           Grouping="" Genre="" Kind="WAV ファイル" Size="1155024" TotalTime="4"
+           DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="0.00" DateAdded="2025-04-12"
+           BitRate="2116" SampleRate="44100" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20201.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="109273573" Name="IMPACT SNARE" Artist="Loopmasters"
+           Composer="" Album="" Grouping="" Genre="" Kind="WAV ファイル"
+           Size="1489766" TotalTime="5" DiscNumber="0" TrackNumber="0" Year="0"
+           AverageBpm="0.00" DateAdded="2025-04-12" BitRate="2116" SampleRate="44100"
+           Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20208.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="7146621" Name="SHORT BOOM" Artist="Loopmasters" Composer=""
+           Album="" Grouping="" Genre="" Kind="WAV ファイル" Size="652554"
+           TotalTime="2" DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="0.00"
+           DateAdded="2025-04-12" BitRate="2116" SampleRate="44100" Comments=""
+           PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/PioneerDJ/Sampler/MERGE%20FX/MergeFX%20Sample%20Sound%20209.wav"
+           Remixer="" Tonality="" Label="" Mix=""/>
+    <TRACK TrackID="48276904" Name="わくわくクッキングタイム的なBGM"
+           Artist="タカオマサキ" Composer="" Album="TK-Sounds" Grouping=""
+           Genre="Jazz" Kind="MP3 ファイル" Size="2512761" TotalTime="124"
+           DiscNumber="0" TrackNumber="0" Year="2016" AverageBpm="130.00"
+           DateAdded="2023-08-28" BitRate="160" SampleRate="44100" Comments=""
+           PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/%e3%82%bf%e3%82%ab%e3%82%aa%e3%83%9e%e3%82%b5%e3%82%ad/TK-Sounds/%e3%82%8f%e3%81%8f%e3%82%8f%e3%81%8f%e3%82%af%e3%83%83%e3%82%ad%e3%83%b3%e3%82%b0%e3%82%bf%e3%82%a4%e3%83%a0%e7%9a%84%e3%81%aaBGM.mp3"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.047" Bpm="130.00" Metro="4/4" Battito="1"/>
+    </TRACK>
+    <TRACK TrackID="35233285" Name="3分間でクッキング" Artist="BGMer"
+           Composer="BGMer" Album="フリーBGM" Grouping="" Genre="" Kind="MP3 ファイル"
+           Size="8034062" TotalTime="324" DiscNumber="0" TrackNumber="0"
+           Year="0" AverageBpm="150.00" DateAdded="2023-08-28" BitRate="192"
+           SampleRate="48000" Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/BGMer/%e3%83%95%e3%83%aa%e3%83%bcBGM/3%e5%88%86%e9%96%93%e3%81%a7%e3%82%af%e3%83%83%e3%82%ad%e3%83%b3%e3%82%b0.mp3"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.245" Bpm="150.00" Metro="4/4" Battito="4"/>
+      <TEMPO Inizio="83.044" Bpm="150.00" Metro="4/4" Battito="3"/>
+    </TRACK>
+    <TRACK TrackID="193578412" Name="qp-theme" Artist="" Composer="" Album=""
+           Grouping="" Genre="" Kind="M4A ファイル" Size="2370680" TotalTime="149"
+           DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="151.38" DateAdded="2023-08-31"
+           BitRate="0" SampleRate="44100" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Unknown%20Artist/Unknown%20Album/qp-theme.m4a"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.199" Bpm="151.38" Metro="4/4" Battito="1"/>
+      <TEMPO Inizio="0.596" Bpm="151.38" Metro="4/4" Battito="2"/>
+      <TEMPO Inizio="100.874" Bpm="151.38" Metro="4/4" Battito="3"/>
+    </TRACK>
+    <TRACK TrackID="192477164" Name="うごくちゃん 3月9日 歌ってみた-1"
+           Artist="" Composer="" Album="" Grouping="" Genre="" Kind="M4A ファイル"
+           Size="7710782" TotalTime="267" DiscNumber="0" TrackNumber="0"
+           Year="0" AverageBpm="146.53" DateAdded="2023-12-14" BitRate="0"
+           SampleRate="44100" Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Unknown%20Artist/Unknown%20Album/%e3%81%86%e3%81%94%e3%81%8f%e3%81%a1%e3%82%83%e3%82%93%203%e6%9c%889%e6%97%a5%20%e6%ad%8c%e3%81%a3%e3%81%a6%e3%81%bf%e3%81%9f-1.m4a"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.015" Bpm="146.53" Metro="4/4" Battito="2"/>
+      <TEMPO Inizio="0.425" Bpm="146.53" Metro="4/4" Battito="3"/>
+      <TEMPO Inizio="0.835" Bpm="146.53" Metro="4/4" Battito="4"/>
+      <TEMPO Inizio="52.837" Bpm="146.53" Metro="4/4" Battito="3"/>
+      <TEMPO Inizio="111.800" Bpm="146.53" Metro="4/4" Battito="3"/>
+      <TEMPO Inizio="163.802" Bpm="146.53" Metro="4/4" Battito="2"/>
+      <TEMPO Inizio="222.765" Bpm="146.53" Metro="4/4" Battito="2"/>
+    </TRACK>
+    <TRACK TrackID="163617597" Name="Untitled AA (snippet)" Artist="Unknown Artist"
+           Composer="" Album="PULPCORN009" Grouping="" Genre="" Kind="M4A ファイル"
+           Size="4069929" TotalTime="180" DiscNumber="0" TrackNumber="2"
+           Year="2023" AverageBpm="132.00" DateAdded="2024-01-17" BitRate="0"
+           SampleRate="44100" Comments="Visit https://pulpcorn.bandcamp.com"
+           PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Unknown%20Artist/PULPCORN009/02%20Untitled%20AA%20(snippet).m4a"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.102" Bpm="132.00" Metro="4/4" Battito="1"/>
+      <POSITION_MARK Name="" Type="0" Start="0.102" Num="-1"/>
+      <POSITION_MARK Name="" Type="0" Start="47.374" Num="0" Red="255" Green="55"
+                     Blue="111"/>
+      <POSITION_MARK Name="" Type="0" Start="63.738" Num="1" Red="69" Green="172"
+                     Blue="219"/>
+      <POSITION_MARK Name="" Type="0" Start="81.920" Num="2" Red="125" Green="193"
+                     Blue="61"/>
+      <POSITION_MARK Name="" Type="0" Start="89.193" Num="3" Red="170" Green="114"
+                     Blue="255"/>
+    </TRACK>
+    <TRACK TrackID="225256850" Name="Lotta Love Ryuki Miyamoto Bootleg _ m-flo loves MINMI master"
+           Artist="" Composer="" Album="" Grouping="" Genre="" Kind="MP3 ファイル"
+           Size="10514256" TotalTime="241" DiscNumber="0" TrackNumber="0"
+           Year="0" AverageBpm="130.00" DateAdded="2024-01-24" BitRate="320"
+           SampleRate="44100" Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Unknown%20Artist/Unknown%20Album/Lotta%20Love%20Ryuki%20Miyamoto%20Bootleg%20_%20m-flo%20loves%20MINMI%20master.mp3"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.027" Bpm="130.00" Metro="4/4" Battito="1"/>
+    </TRACK>
+    <TRACK TrackID="7401428" Name="GILA GILA feat. JP THE WAVY, YZERR (Prod. Chaki Zulu) -Ryuki Miyamoto Bootleg- "
+           Artist="Awich" Composer="" Album="" Grouping="" Genre="その他"
+           Kind="MP3 ファイル" Size="10755275" TotalTime="186" DiscNumber="0"
+           TrackNumber="0" Year="2022" AverageBpm="128.00" DateAdded="2024-01-24"
+           BitRate="320" SampleRate="44100" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Awich/Unknown%20Album/GILA%20GILA%20feat.%20JP%20THE%20WAVY,%20YZERR%20(Prod.%20Chaki%20Zulu)%20-Ryuki%20Miyamoto%20Bootleg-.mp3"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.027" Bpm="128.00" Metro="4/4" Battito="4"/>
+    </TRACK>
+    <TRACK TrackID="12700090" Name="tofubeats drum machine Ryuki Miyamoto Bootleg master final"
+           Artist="" Composer="" Album="" Grouping="" Genre="" Kind="WAV ファイル"
+           Size="37339988" TotalTime="211" DiscNumber="0" TrackNumber="0"
+           Year="0" AverageBpm="144.00" DateAdded="2024-01-24" BitRate="1411"
+           SampleRate="44100" Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Unknown%20Artist/Unknown%20Album/tofubeats%20drum%20machine%20Ryuki%20Miyamoto%20Bootleg%20master%20final.wav"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.001" Bpm="144.00" Metro="4/4" Battito="1"/>
+    </TRACK>
+    <TRACK TrackID="83956551" Name="goku vibes new ver mastering 1" Artist=""
+           Composer="" Album="" Grouping="" Genre="" Kind="MP3 ファイル"
+           Size="13848106" TotalTime="346" DiscNumber="0" TrackNumber="0"
+           Year="0" AverageBpm="140.00" DateAdded="2024-01-24" BitRate="320"
+           SampleRate="44100" Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Unknown%20Artist/Unknown%20Album/goku%20vibes%20new%20ver%20mastering%201.mp3"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.037" Bpm="140.00" Metro="4/4" Battito="1"/>
+    </TRACK>
+    <TRACK TrackID="184429594" Name="HyperJuice - Temple Riot(Ryuki Miyamoto &amp; Blacklolita Remix)"
+           Artist="HyperJuice, Ryuki Miyamoto, Blacklolita" Composer=""
+           Album="" Grouping="" Genre="Hybrid Trap" Kind="MP3 ファイル"
+           Size="9815023" TotalTime="243" DiscNumber="0" TrackNumber="0"
+           Year="2016" AverageBpm="150.00" DateAdded="2024-01-24" BitRate="320"
+           SampleRate="44100" Comments="http://soundcloud.com/lanchr" PlayCount="0"
+           Rating="0" Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/HyperJuice,%20Ryuki%20Miyamoto,%20Blacklolita/Unknown%20Album/HyperJuice%20-%20Temple%20Riot(Ryuki%20Miyamoto%20%26%20Blacklolita%20Remix).mp3"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.024" Bpm="150.00" Metro="4/4" Battito="1"/>
+      <TEMPO Inizio="164.023" Bpm="150.00" Metro="4/4" Battito="3"/>
+    </TRACK>
+    <TRACK TrackID="118168900" Name="Wakarimasen (Ryuki Miyamoto Bootleg)_MIYACHI_master"
+           Artist="" Composer="" Album="" Grouping="" Genre="" Kind="MP3 ファイル"
+           Size="7926724" TotalTime="178" DiscNumber="0" TrackNumber="0"
+           Year="0" AverageBpm="129.99" DateAdded="2024-01-24" BitRate="320"
+           SampleRate="44100" Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Unknown%20Artist/Unknown%20Album/Wakarimasen%20(Ryuki%20Miyamoto%20Bootleg)_MIYACHI_master.mp3"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.025" Bpm="129.99" Metro="4/4" Battito="1"/>
+    </TRACK>
+    <TRACK TrackID="104230780" Name="Ultra MIDI (Miii Bootleg)[Ryuki Miyamoto Bootleg] _ AMUNOA"
+           Artist="" Composer="" Album="" Grouping="" Genre="" Kind="MP3 ファイル"
+           Size="6254522" TotalTime="150" DiscNumber="0" TrackNumber="0"
+           Year="0" AverageBpm="150.00" DateAdded="2024-01-24" BitRate="320"
+           SampleRate="44100" Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Unknown%20Artist/Unknown%20Album/Ultra%20MIDI%20(Miii%20Bootleg)%5bRyuki%20Miyamoto%20Bootleg%5d%20_%20AMUNOA.mp3"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.028" Bpm="150.00" Metro="4/4" Battito="1"/>
+    </TRACK>
+    <TRACK TrackID="108623891" Name="Bass Cannon (Ryuki Miyamoto Bootleg) (1)"
+           Artist="" Composer="" Album="" Grouping="" Genre="" Kind="MP3 ファイル"
+           Size="9707808" TotalTime="228" DiscNumber="0" TrackNumber="0"
+           Year="0" AverageBpm="130.00" DateAdded="2024-01-24" BitRate="320"
+           SampleRate="44100" Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Unknown%20Artist/Unknown%20Album/Bass%20Cannon%20(Ryuki%20Miyamoto%20Bootleg)%20(1).mp3"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.026" Bpm="130.00" Metro="4/4" Battito="1"/>
+    </TRACK>
+    <TRACK TrackID="265160035" Name="Skrillex, Missy Elliot &amp; Mr. Oizo - RATATA (KREAM Remix) [Extended Mix]"
+           Artist="" Composer="" Album="" Grouping="" Genre="" Kind="WAV ファイル"
+           Size="62556558" TotalTime="217" DiscNumber="0" TrackNumber="0"
+           Year="0" AverageBpm="126.00" DateAdded="2024-01-24" BitRate="2304"
+           SampleRate="48000" Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Unknown%20Artist/Unknown%20Album/Skrillex,%20Missy%20Elliot%20%26%20Mr.%20Oizo%20-%20RATATA%20(KREAM%20Remix)%20%5bExtended%20Mix%5d.wav"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.016" Bpm="126.00" Metro="4/4" Battito="1"/>
+    </TRACK>
+    <TRACK TrackID="218238713" Name="In The Dark-Flashes" Artist="Jess Stacy"
+           Composer="" Album="BL Sound Archive (PARLOPHONE R 2233 9CS0019953)"
+           Grouping="" Genre="" Kind="MP3 ファイル" Size="3974238" TotalTime="197"
+           DiscNumber="0" TrackNumber="6" Year="0" AverageBpm="154.01" DateAdded="2024-04-30"
+           BitRate="160" SampleRate="44100" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Jess%20Stacy/BL%20Sound%20Archive%20(PARLOPHONE%20R%202233%209CS0019953)/06%20In%20The%20Dark-Flashes.mp3"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.052" Bpm="154.01" Metro="4/4" Battito="2"/>
+    </TRACK>
+    <TRACK TrackID="29266484" Name="I&apos;m Sober Now - Pine Top Smith"
+           Artist="Various Artists - Shanachie Records Yazoo" Composer=""
+           Album="Shake Your Wicked Knees" Grouping="" Genre="Blues" Kind="MP3 ファイル"
+           Size="3074723" TotalTime="191" DiscNumber="1" TrackNumber="17"
+           Year="2001" AverageBpm="135.89" DateAdded="2024-04-30" BitRate="0"
+           SampleRate="44100" Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Various%20Artists%20-%20Shanachie%20Records%20Yazoo/Shake%20Your%20Wicked%20Knees/17%20I%27m%20Sober%20Now%20-%20Pine%20Top%20Smith.mp3"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.016" Bpm="135.89" Metro="4/4" Battito="2"/>
+    </TRACK>
+    <TRACK TrackID="163591788" Name="Johnny Dodds Trio" Artist="Little Bits"
+           Composer="" Album="BL Sound Archive (Hot Jazz Club Of America HC 42 1CS0082141)"
+           Grouping="" Genre="" Kind="MP3 ファイル" Size="3747637" TotalTime="187"
+           DiscNumber="0" TrackNumber="4" Year="0" AverageBpm="114.12" DateAdded="2024-04-30"
+           BitRate="160" SampleRate="44100" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Little%20Bits/BL%20Sound%20Archive%20(Hot%20Jazz%20Club%20Of%20America%20HC%2042%201CS0082141)/04%20Johnny%20Dodds%20Trio.mp3"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.320" Bpm="114.12" Metro="4/4" Battito="3"/>
+    </TRACK>
+    <TRACK TrackID="76445574" Name="Will you marry me PTR_Rmix INST" Artist=""
+           Composer="" Album="" Grouping="" Genre="" Kind="WAV ファイル"
+           Size="32743776" TotalTime="185" DiscNumber="0" TrackNumber="0"
+           Year="0" AverageBpm="172.00" DateAdded="2024-06-08" BitRate="1411"
+           SampleRate="44100" Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Unknown%20Artist/Unknown%20Album/Will%20you%20marry%20me%20PTR_Rmix%20INST.wav"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.176" Bpm="172.00" Metro="4/4" Battito="2"/>
+    </TRACK>
+    <TRACK TrackID="157951581" Name="Meltdown" Artist="Kagamine Rin" Composer=""
+           Album="Kagamine Rin &amp; Len Song Collection [CD1]" Grouping=""
+           Genre="その他" Kind="MP3 ファイル" Size="7995005" TotalTime="332"
+           DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="165.00" DateAdded="2024-06-24"
+           BitRate="192" SampleRate="44100" Comments="" PlayCount="0" Rating="0"
+           Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Kagamine%20Rin/Kagamine%20Rin%20%26%20Len%20Song%20Collection%20%5bCD1%5d/Meltdown.mp3"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.135" Bpm="165.00" Metro="4/4" Battito="1"/>
+    </TRACK>
+    <TRACK TrackID="203106671" Name="Stream Y2mate.com - 呪術廻戦のOP廻廻奇譚を歌った結果特急呪物化してしまったノエルの歌枠w朗読会白銀"
+           Artist="" Composer="" Album="" Grouping="" Genre="" Kind="MP3 ファイル"
+           Size="4031215" TotalTime="251" DiscNumber="0" TrackNumber="0"
+           Year="0" AverageBpm="92.48" DateAdded="2025-01-27" BitRate="128"
+           SampleRate="44100" Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Unknown%20Artist/Unknown%20Album/Stream%20Y2mate.com%20-%20%e5%91%aa%e8%a1%93%e5%bb%bb%e6%88%a6%e3%81%aeOP%e5%bb%bb%e5%bb%bb%e5%a5%87%e8%ad%9a%e3%82%92%e6%ad%8c%e3%81%a3%e3%81%9f%e7%b5%90%e6%9e%9c%e7%89%b9%e6%80%a5%e5%91%aa%e7%89%a9%e5%8c%96%e3%81%97%e3%81%a6%e3%81%97%e3%81%be%e3%81%a3%e3%81%9f%e3%83%8e%e3%82%a8%e3%83%ab%e3%81%ae%e6%ad%8c%e6%9e%a0w%e6%9c%97%e8%aa%ad%e4%bc%9a%e7%99%bd%e9%8a%80.mp3"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.159" Bpm="92.48" Metro="4/4" Battito="3"/>
+    </TRACK>
+    <TRACK TrackID="127714909" Name="Kanjukuoh_song_full（オケ有り）"
+           Artist="" Composer="" Album="" Grouping="" Genre="" Kind="MP3 ファイル"
+           Size="3553827" TotalTime="177" DiscNumber="0" TrackNumber="0"
+           Year="0" AverageBpm="174.98" DateAdded="2025-01-27" BitRate="160"
+           SampleRate="48000" Comments="" PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Unknown%20Artist/Unknown%20Album/Kanjukuoh_song_full%ef%bc%88%e3%82%aa%e3%82%b1%e6%9c%89%e3%82%8a%ef%bc%89.mp3"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.049" Bpm="174.98" Metro="4/4" Battito="1"/>
+    </TRACK>
+    <TRACK TrackID="244609217" Name="kimigayo" Artist="" Composer="" Album=""
+           Grouping="" Genre="" Kind="WAV ファイル" Size="12861996"
+           TotalTime="66" DiscNumber="0" TrackNumber="0" Year="0" AverageBpm="119.33"
+           DateAdded="2025-04-02" BitRate="1536" SampleRate="48000" Comments=""
+           PlayCount="0" Rating="0" Location="file://localhost/Users/ykuwashima/Music/Music/Media.localized/Music/Unknown%20Artist/Unknown%20Album/kimigayo.wav"
+           Remixer="" Tonality="" Label="" Mix="">
+      <TEMPO Inizio="0.141" Bpm="119.33" Metro="4/4" Battito="3"/>
+    </TRACK>
+  </COLLECTION>
+  <PLAYLISTS>
+    <NODE Type="0" Name="ROOT" Count="2">
+      <NODE Name="xxx" Type="1" KeyType="0" Entries="5">
+        <TRACK Key="48276904"/>
+        <TRACK Key="35233285"/>
+        <TRACK Key="193578412"/>
+        <TRACK Key="192477164"/>
+        <TRACK Key="163617597"/>
+      </NODE>
+      <NODE Name="2025" Type="0" Count="2">
+        <NODE Name="aaa" Type="1" KeyType="0" Entries="7">
+          <TRACK Key="192477164"/>
+          <TRACK Key="163617597"/>
+          <TRACK Key="225256850"/>
+          <TRACK Key="7401428"/>
+          <TRACK Key="12700090"/>
+          <TRACK Key="83956551"/>
+          <TRACK Key="184429594"/>
+        </NODE>
+        <NODE Name="bbb" Type="1" KeyType="0" Entries="6">
+          <TRACK Key="83956551"/>
+          <TRACK Key="184429594"/>
+          <TRACK Key="118168900"/>
+          <TRACK Key="104230780"/>
+          <TRACK Key="108623891"/>
+          <TRACK Key="265160035"/>
+        </NODE>
+      </NODE>
+    </NODE>
+  </PLAYLISTS>
+</DJ_PLAYLISTS>

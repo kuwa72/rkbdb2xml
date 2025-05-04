@@ -58,5 +58,10 @@ def test_top_level_and_collection_playlists_and_track_attributes():
         ref_nodes = ref_playlists.findall('NODE')
         out_nodes = out_playlists.findall('NODE')
         assert len(ref_nodes) == len(out_nodes), f"PLAYLISTS/NODE数: expected {len(ref_nodes)}, got {len(out_nodes)}"
+        # TEMPO要素検証: 各TRACKに1つのTEMPOがあり、Bpm属性がAverageBpmと一致
+        for tr in out_tracks:
+            tempos = tr.findall('TEMPO')
+            assert len(tempos) == 1, f"Track {tr.attrib['TrackID']} Tempo count: {len(tempos)}"
+            assert tempos[0].attrib.get('Bpm') == tr.attrib.get('AverageBpm')
     finally:
         os.remove(temp_path)
