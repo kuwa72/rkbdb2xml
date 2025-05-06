@@ -16,52 +16,33 @@ rkbdb2xml allows you to create XML exports from your Rekordbox database in the s
 
 ## Features
 
-- Modern CLI interface with progress indicators
-- Auto-detection of Rekordbox database location
-- Export complete track metadata
-- Support for playlists including nested folders
-- Include tempo markers (beatgrids)  
-- Include position markers (cue points)
-- Well-structured output matching native Rekordbox XML format
-- Comprehensive validation and comparison tools
+- Modern CLI interface (export, list-playlists, version)
+- Auto-detection of Rekordbox database path
+- Export complete track metadata in Rekordbox XML format
+- Support for nested playlist folders
+- Optional romaji conversion (--roman) and BPM prefix (--bpm)
+- Order tracks by default or BPM (--orderby bpm)
+- Copy audio files to output directory, updating metadata tags
+- Overwrite output with --force flag and verbose logging with --verbose
 
 ## Installation
 
 ### Using pip (recommended)
 
 ```bash
-# Create and activate a virtual environment (recommended)
-python -m venv venv
-source venv/bin/activate  # On Windows, use: venv\Scripts\activate
-
-# Install from PyPI
+python -m venv .venv
+.venv\Scripts\activate  # On Windows
 pip install rkbdb2xml
 ```
 
-### Development Installation with Poetry
+### Development Installation
 
 ```bash
-# Clone the repository
 git clone https://github.com/kuwa72/rkbdb2xml.git
 cd rkbdb2xml
-
-# Create a virtual environment and install with Poetry
-python -m venv venv
-source venv/bin/activate  # On Windows, use: venv\Scripts\activate
-pip install poetry
-poetry install
-```
-
-### Alternative Development Installation with pip
-
-```bash
-# Clone the repository
-git clone https://github.com/kuwa72/rkbdb2xml.git
-cd rkbdb2xml
-
-# Create a virtual environment and install in development mode
-python -m venv venv
-source venv/bin/activate  # On Windows, use: venv\Scripts\activate
+python -m venv .venv
+.venv\Scripts\activate  # On Windows
+pip install -r requirements.txt
 pip install -e .
 ```
 
@@ -100,105 +81,57 @@ rkbdb2xml export --help
 
 ## Python API Usage
 
-You can also use rkbdb2xml as a library in your own Python code:
+You can use rkbdb2xml as a library in your Python code:
 
 ```python
 from rkbdb2xml.rkbdb2xml import export_rekordbox_db_to_xml
 
-# Auto-detect Rekordbox database and export to XML
+# Auto-detect and export to XML
 export_rekordbox_db_to_xml(None, "output.xml", verbose=True)
 
 # Specify a custom database path
 export_rekordbox_db_to_xml("/path/to/rekordbox.db", "output.xml")
 ```
 
-More advanced usage with custom configuration:
-
 ```python
 from rkbdb2xml.rkbdb2xml import RekordboxXMLExporter
-from rich.console import Console
 
-# Create a console for output
-console = Console()
-
-# Create an exporter with auto-detection
-exporter = RekordboxXMLExporter(console=console)
-
-# Generate XML
-exporter.generate_xml("output.xml", verbose=True)
-
-# Close the database connection
+# Create exporter with verbose output
+exporter = RekordboxXMLExporter(None, None, use_verbose=True)
+exporter.generate_xml("output.xml")
 exporter.close()
 ```
-
-## Validation and Comparison Tools
-
-The project includes several utility tools for validating and comparing XML files:
-
-```bash
-# Compare two XML files
-python tools/compare_xml.py original.xml generated.xml
-
-# Analyze an XML file structure
-python tools/analyze_xml.py rekordbox.xml
-
-# Validate output against a sample
-python tools/validate_xml.py sample.xml --output generated.xml
-
-# Clean rewrite an XML file for structure verification
-python tools/rewrite_xml.py input.xml output.xml
-```
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Database not found**: If auto-detection fails, manually specify the database path:
-   ```bash
-   rkbdb2xml export /path/to/database/rekordbox.db -o output.xml
-   ```
-
-2. **Database location by OS**:
-   - **Windows**: `C:\Users\[username]\AppData\Roaming\Pioneer\rekordbox\[version]\database.db`
-   - **macOS**: `/Users/[username]/Library/Pioneer/rekordbox/[version]/database.db`
-
-3. **Missing dependencies**: Ensure all dependencies are installed:
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-4. **Permission errors**: Make sure you have appropriate read permissions for the Rekordbox database and write permissions for the output directory.
-
-5. **Rekordbox version compatibility**: This tool is tested with Rekordbox 6.x. For other versions, please report any issues on the GitHub repository.
 
 ## Requirements
 
 - Python 3.8+
-- pyrekordbox
+- pyrekordbox>=0.4.0
 - lxml
-- click and typer (for command line interface)
-- rich (for terminal output formatting)
+- typer
+- rich
+- mutagen
+- psutil
 
 ## Development
 
-This project uses [Poetry](https://python-poetry.org/) for dependency management.
-
 ```bash
-# Setup development environment
-poetry install
+# Clone repository and setup development environment
+git clone https://github.com/kuwa72/rkbdb2xml.git
+cd rkbdb2xml
+python -m venv .venv
+.venv\Scripts\activate  # On Windows
+pip install -r requirements.txt
+pip install -e .
 
 # Run tests
-poetry run pytest
+pytest tests/
 
-# Run specific tests
-poetry run pytest tests/test_rkbdb2xml.py
+# Run with coverage
+pytest --cov=rkbdb2xml
 
-# Run with code coverage
-poetry run pytest --cov=rkbdb2xml
-
-# Run linting
-poetry run flake8
-poetry run mypy .
+# Lint and type-check
+flake8
+mypy .
 ```
 
 ## Contributing
