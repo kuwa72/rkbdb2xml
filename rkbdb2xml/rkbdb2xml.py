@@ -21,7 +21,7 @@ import psutil
 import shutil
 
 REKORDBOX_VERSION = "6.8.0"
-
+DEFAULT_XML_FILENAME = "rekordbox.xml"
 
 class RekordboxXMLExporter:
     """

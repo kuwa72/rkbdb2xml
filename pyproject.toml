@@ -10,10 +10,9 @@ readme = "README.md"
 authors = [
     {name = "kuwa72", email = "kuwa72@github.com"}
 ]
-license = {text = "MIT"}
+license = "MIT"
 classifiers = [
     "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 requires-python = ">=3.8"
@@ -28,6 +27,9 @@ dependencies = [
 
 [project.scripts]
 rkbdb2xml = "rkbdb2xml.cli:main"
+
+[tool.setuptools]
+packages = ["rkbdb2xml", "rkbdb2xml_gui"]
 
 [flake8]
 ignore = ["E203", "E501"]
