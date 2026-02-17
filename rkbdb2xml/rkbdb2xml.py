@@ -37,9 +37,16 @@ class RekordboxXMLExporter:
         use_bpm: bool = False,
         orderby: str = "default",
         playlist_specs: Optional[List[str]] = None,
+        playlist_options: Optional[Dict[str, Dict[str, Any]]] = None,
     ):
         """
         Initialize the exporter with the path to the Rekordbox database.
+
+        Args:
+            playlist_options: Per-playlist options dict mapping playlist path
+                to {"roman": bool, "bpm": bool, "orderby": str}.
+                When provided, these override the global roman/bpm/orderby
+                settings for matched playlists.
         """
         self._verbose = use_verbose
         self._use_roman = use_roman
@@ -47,8 +54,16 @@ class RekordboxXMLExporter:
         self._orderby = orderby
         # Playlist selection specs parsed from CLI
         self._playlist_specs = playlist_specs
+        # Per-playlist options (path -> {roman, bpm, orderby})
+        self._playlist_options = playlist_options or {}
+        # Per-track options resolved during playlist processing
+        # track_id -> {roman, bpm}
+        self._track_options: Dict[Any, Dict[str, Any]] = {}
         self._roman_converter = None
-        if use_roman:
+        needs_roman = use_roman or any(
+            opts.get("roman", False) for opts in self._playlist_options.values()
+        )
+        if needs_roman:
             try:
                 from romann import RomanConverter
                 self._roman_converter = RomanConverter()
@@ -147,16 +162,22 @@ class RekordboxXMLExporter:
             self.verbose(f"Processing track: {track}")
             self._add_track_to_xml(xml, track)
 
-    def _romanize(self, value: str) -> str:
+    def _romanize(self, value: str, force: Optional[bool] = None) -> str:
         """
-        ローマ字変換（有効時のみ）
+        ローマ字変換
         ASCIIのみの場合は変換をスキップ
+
+        Args:
+            value: 変換対象文字列
+            force: Trueなら強制変換、Falseなら変換しない、
+                   Noneならグローバル設定(_use_roman)に従う
         """
         if not value:
             return value
         if value.isascii():
             return value
-        if self._use_roman and self._roman_converter:
+        should_romanize = force if force is not None else self._use_roman
+        if should_romanize and self._roman_converter:
             try:
                 return self._roman_converter.to_roman(value)
             except Exception as e:
@@ -179,9 +200,12 @@ class RekordboxXMLExporter:
             xml: The RekordboxXml instance
             track: Track data from the database (DjmdContent object)
         """
+        # Resolve per-track options (set during playlist processing)
+        track_opts = self._track_options.get(track.ID, {})
+        use_roman = track_opts.get("roman", self._use_roman)
+        use_bpm = track_opts.get("bpm", self._use_bpm)
+
         # Prepare track attributes
-        track_attrs = {}
-        # 既存の属性ループ
         # まずAverageBpmをtrack_attrsに格納
         avg_bpm_val = self._safe_bpm(getattr(track, 'BPM', None))
         track_attrs = {}
@@ -195,9 +219,9 @@ class RekordboxXMLExporter:
             # ローマ字変換
             if xml_attr == "Name":
                 value = str(value) if value is not None else ""
-                value = self._romanize(value)
-                # --bpm有効時はタイトル先頭にBPM整数値を付与（AverageBpmを利用）
-                if self._use_bpm:
+                value = self._romanize(value, force=use_roman)
+                # BPM有効時はタイトル先頭にBPM整数値を付与
+                if use_bpm:
                     avg_bpm = track_attrs.get("AverageBpm")
                     try:
                         bpm_float = float(avg_bpm) if avg_bpm else 0.0
@@ -211,7 +235,7 @@ class RekordboxXMLExporter:
                             print(f"[BPM TITLE] {old_value} → {value} (AverageBpm={avg_bpm})")
             elif xml_attr in ("Artist", "Album"):
                 value = str(value) if value is not None else ""
-                value = self._romanize(value)
+                value = self._romanize(value, force=use_roman)
             if value is not None:
                 track_attrs[xml_attr] = value
 
@@ -338,6 +362,19 @@ class RekordboxXMLExporter:
                     curr = id_map.get(curr.ParentID)
             all_playlists = [pl for pl in orig_playlists if pl.ID in include_ids]
 
+        # Build path_map for all playlists (needed for per-playlist options)
+        all_for_path = self.db.get_playlist().all()
+        id_map_all = {pl.ID: pl for pl in all_for_path}
+        self._playlist_path_map: Dict[Any, str] = {}
+        for pl in all_for_path:
+            parts = [pl.Name]
+            pid = pl.ParentID
+            while pid in id_map_all:
+                parent = id_map_all[pid]
+                parts.insert(0, parent.Name)
+                pid = parent.ParentID
+            self._playlist_path_map[pl.ID] = "/".join(parts)
+
         db_root = DjmdPlaylist()
         db_root.ID = "root"
         db_root.Name = "root"
@@ -372,11 +409,18 @@ class RekordboxXMLExporter:
             playlist_node: The playlist node to add tracks to
             playlist: The playlist to get tracks for
         """
+        # Resolve per-playlist options
+        pl_path = self._playlist_path_map.get(playlist.ID, "")
+        pl_opts = self._playlist_options.get(pl_path, {})
+        orderby = pl_opts.get("orderby", self._orderby)
+        use_roman = pl_opts.get("roman", self._use_roman)
+        use_bpm = pl_opts.get("bpm", self._use_bpm)
+
         # Get tracks in playlist
         playlist_entries = self.db.get_playlist_contents(playlist).all()
 
-        # --orderby=bpm オプション対応
-        if getattr(self, '_orderby', 'default') == 'bpm':
+        # orderby=bpm オプション対応
+        if orderby == 'bpm':
             def safe_bpm(entry):
                 bpm = entry.BPM
                 if not bpm:
@@ -384,11 +428,16 @@ class RekordboxXMLExporter:
                 return bpm
             playlist_entries = sorted(playlist_entries, key=safe_bpm)
 
-        # Normalize playlist entries
+        # Normalize playlist entries and record per-track options
         for entry in playlist_entries:
             playlist_node.add_track(entry.ID)
-            # Record track ID for collection filtering
             self._selected_track_ids.add(entry.ID)
+            # Store per-track options (first playlist's settings win)
+            if entry.ID not in self._track_options:
+                self._track_options[entry.ID] = {
+                    "roman": use_roman,
+                    "bpm": use_bpm,
+                }
 
     def close(self) -> None:
         """Close the database connection when done."""
@@ -511,6 +560,7 @@ def export_rekordbox_db_to_xml(
     bpm: bool = False,
     orderby: str = "default",
     playlists: Optional[List[str]] = None,
+    playlist_options: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
     """
     Export a Rekordbox database to XML format.
@@ -520,6 +570,8 @@ def export_rekordbox_db_to_xml(
         output_path: Path where the XML file should be saved
         verbose: Show detailed output during export
         db_key: Rekordbox database key (optional, for newer Rekordbox versions)
+        playlist_options: Per-playlist options dict mapping playlist path
+            to {"roman": bool, "bpm": bool, "orderby": str}.
     """
     exporter = RekordboxXMLExporter(
         db_path,
@@ -529,6 +581,7 @@ def export_rekordbox_db_to_xml(
         use_bpm=bpm,
         orderby=orderby,
         playlist_specs=playlists,
+        playlist_options=playlist_options,
     )
     try:
         exporter.generate_xml(output_path)

@@ -1,324 +1,606 @@
+"""
+PySide6 GUI for rkbdb2xml.
+
+Provides a tree-based playlist viewer with per-playlist export options,
+output folder selection, and background export execution.
+"""
+
+import json
+import sys
 import threading
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from PySide6.QtCore import (
+    QObject,
+    QThread,
+    Qt,
+    Signal,
+    Slot,
+)
+from PySide6.QtGui import QIcon, QStandardItem, QStandardItemModel
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QFileDialog,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
+    QSplitter,
+    QTreeView,
+    QVBoxLayout,
+    QWidget,
+)
 
 from pyrekordbox.db6 import Rekordbox6Database as RekordboxDatabase
 
 from .rkbdb2xml import export_rekordbox_db_to_xml
 
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+SETTINGS_FILE = Path.home() / ".rkbdb2xml_gui_settings.json"
 
-class RekordboxExporterGUI(tk.Tk):
+# Column indices for the tree model
+COL_CHECK = 0   # Checkbox + Name
+COL_ROMAN = 1   # Romanize option
+COL_BPM = 2     # BPM-in-title option
+COL_SORT = 3    # Sort order option
+
+# Custom data roles stored on items
+ROLE_PATH = Qt.UserRole + 1       # hierarchical path string
+ROLE_IS_FOLDER = Qt.UserRole + 2  # bool
+ROLE_PL_ID = Qt.UserRole + 3     # playlist ID
+
+
+# ---------------------------------------------------------------------------
+# Export worker
+# ---------------------------------------------------------------------------
+class ExportWorker(QObject):
+    """Runs export_rekordbox_db_to_xml in a background thread."""
+
+    progress = Signal(str)   # log messages
+    finished = Signal()
+    error = Signal(str)
+
+    def __init__(
+        self,
+        db_path: Optional[str],
+        output_path: str,
+        playlists: Optional[List[str]],
+        playlist_options: Optional[Dict[str, dict]] = None,
+    ):
+        super().__init__()
+        self._db_path = db_path
+        self._output_path = output_path
+        self._playlists = playlists
+        self._playlist_options = playlist_options or {}
+
+    @Slot()
+    def run(self) -> None:
+        import io
+        import sys
+
+        try:
+            self.progress.emit(f"エクスポート開始: {self._output_path}")
+
+            # Redirect stdout to capture verbose output and avoid
+            # cp932 encoding errors on Windows.
+            old_stdout = sys.stdout
+            capture = io.StringIO()
+            sys.stdout = capture
+
+            try:
+                export_rekordbox_db_to_xml(
+                    self._db_path,
+                    self._output_path,
+                    db_key=None,
+                    verbose=True,
+                    roman=False,
+                    bpm=False,
+                    orderby="default",
+                    playlists=self._playlists,
+                    playlist_options=self._playlist_options,
+                )
+            finally:
+                sys.stdout = old_stdout
+
+            # Emit captured output (last 50 lines to avoid flooding)
+            output = capture.getvalue()
+            if output:
+                lines = output.strip().splitlines()
+                for line in lines[-50:]:
+                    self.progress.emit(line)
+
+            self.progress.emit("エクスポート完了!")
+        except Exception as e:
+            self.error.emit(str(e))
+        finally:
+            self.finished.emit()
+
+
+# ---------------------------------------------------------------------------
+# Sort-order delegate helper
+# ---------------------------------------------------------------------------
+SORT_OPTIONS = ["デフォルト", "BPM昇順"]
+SORT_MAP = {"デフォルト": "default", "BPM昇順": "bpm"}
+SORT_MAP_REV = {v: k for k, v in SORT_MAP.items()}
+
+
+# ---------------------------------------------------------------------------
+# Main window
+# ---------------------------------------------------------------------------
+class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.title("rkbdb2xml GUI")
-        self._playlist_rows: List[dict] = []
-        self._settings_file = Path.home() / ".rkbdb2xml_gui_settings.json"
-        self._create_widgets()
-        self._load_last_settings()
+        self.setWindowTitle("rkbdb2xml")
+        self.setMinimumSize(800, 600)
+        self.resize(1000, 700)
 
-    def _create_widgets(self) -> None:
-        main = ttk.Frame(self, padding=10)
-        main.grid(row=0, column=0, sticky="nsew")
+        self._export_thread: Optional[QThread] = None
 
-        self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
+        self._build_ui()
+        self._load_playlists()
 
-        main.columnconfigure(1, weight=1)
+    # ----- UI construction -----
 
-        # DB path
-        ttk.Label(main, text="Rekordbox DB path (optional)").grid(row=0, column=0, sticky="w")
-        self.db_path_var = tk.StringVar()
-        db_entry = ttk.Entry(main, textvariable=self.db_path_var)
-        db_entry.grid(row=0, column=1, sticky="ew", padx=(5, 5))
-        ttk.Button(main, text="Browse", command=self._browse_db).grid(row=0, column=2, sticky="w")
+    def _build_ui(self) -> None:
+        central = QWidget()
+        self.setCentralWidget(central)
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
 
-        # Output XML
-        ttk.Label(main, text="Output XML file").grid(row=1, column=0, sticky="w", pady=(5, 0))
-        self.output_path_var = tk.StringVar()
-        out_entry = ttk.Entry(main, textvariable=self.output_path_var)
-        out_entry.grid(row=1, column=1, sticky="ew", padx=(5, 5), pady=(5, 0))
-        ttk.Button(main, text="Browse", command=self._browse_output).grid(row=1, column=2, sticky="w", pady=(5, 0))
+        # --- Output folder row ---
+        out_row = QHBoxLayout()
+        out_row.addWidget(QLabel("出力先フォルダ:"))
+        self._output_edit = QLineEdit()
+        self._output_edit.setPlaceholderText("エクスポート先のフォルダを選択...")
+        out_row.addWidget(self._output_edit, 1)
+        browse_btn = QPushButton("参照...")
+        browse_btn.clicked.connect(self._browse_output)
+        out_row.addWidget(browse_btn)
+        layout.addLayout(out_row)
 
-        # DB key
-        ttk.Label(main, text="DB key (optional)").grid(row=2, column=0, sticky="w", pady=(5, 0))
-        self.db_key_var = tk.StringVar()
-        key_entry = ttk.Entry(main, textvariable=self.db_key_var)
-        key_entry.grid(row=2, column=1, sticky="ew", padx=(5, 5), pady=(5, 0))
+        # --- Tree view ---
+        self._model = QStandardItemModel()
+        self._model.setHorizontalHeaderLabels(["プレイリスト", "Roman", "BPM", "ソート順"])
 
-        # Options row
-        options_frame = ttk.Frame(main)
-        options_frame.grid(row=3, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        self._tree = QTreeView()
+        self._tree.setModel(self._model)
+        self._tree.setAlternatingRowColors(True)
+        self._tree.setAnimated(True)
+        self._tree.setUniformRowHeights(True)
+        self._tree.header().setStretchLastSection(False)
+        self._tree.header().setSectionResizeMode(COL_CHECK, QHeaderView.Stretch)
+        self._tree.header().setSectionResizeMode(COL_ROMAN, QHeaderView.ResizeToContents)
+        self._tree.header().setSectionResizeMode(COL_BPM, QHeaderView.ResizeToContents)
+        self._tree.header().setSectionResizeMode(COL_SORT, QHeaderView.ResizeToContents)
 
-        self.verbose_var = tk.BooleanVar(value=True)
-        self.force_var = tk.BooleanVar(value=False)
-        self.roman_var = tk.BooleanVar(value=True)
-        self.bpm_var = tk.BooleanVar(value=True)
+        # Connect item-changed for checkbox cascading
+        self._model.itemChanged.connect(self._on_item_changed)
 
-        ttk.Checkbutton(options_frame, text="Verbose", variable=self.verbose_var).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(options_frame, text="Force overwrite", variable=self.force_var).grid(row=0, column=1, sticky="w", padx=(10, 0))
-        ttk.Checkbutton(options_frame, text="Roman (romaji)", variable=self.roman_var).grid(row=0, column=2, sticky="w", padx=(10, 0))
-        ttk.Checkbutton(options_frame, text="BPM in title", variable=self.bpm_var).grid(row=0, column=3, sticky="w", padx=(10, 0))
+        layout.addWidget(self._tree, 1)
 
-        # Order by
-        ttk.Label(main, text="Order by").grid(row=4, column=0, sticky="w", pady=(10, 0))
-        self.orderby_var = tk.StringVar(value="bpm")
-        order_combo = ttk.Combobox(main, textvariable=self.orderby_var, state="readonly", values=["default", "bpm"])
-        order_combo.grid(row=4, column=1, sticky="w", padx=(5, 5), pady=(10, 0))
+        # --- Export button row ---
+        export_row = QHBoxLayout()
+        self._export_btn = QPushButton("エクスポート開始")
+        self._export_btn.setMinimumHeight(36)
+        self._export_btn.clicked.connect(self._on_export)
+        export_row.addWidget(self._export_btn)
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 0)  # indeterminate
+        self._progress.setVisible(False)
+        export_row.addWidget(self._progress)
+        layout.addLayout(export_row)
 
-        # Playlists section
-        ttk.Label(main, text="Playlists").grid(row=5, column=0, sticky="nw", pady=(10, 0))
-        playlists_frame = ttk.Frame(main)
-        playlists_frame.grid(row=5, column=1, columnspan=2, sticky="nsew", padx=(5, 5), pady=(10, 0))
+        # --- Log area ---
+        self._log = QPlainTextEdit()
+        self._log.setReadOnly(True)
+        self._log.setMaximumHeight(150)
+        self._log.setPlaceholderText("ログ出力...")
+        layout.addWidget(self._log)
 
-        playlists_frame.columnconfigure(0, weight=1)
-        playlists_frame.rowconfigure(1, weight=1)
-
-        load_btn = ttk.Button(playlists_frame, text="Load playlists from DB", command=self._load_playlists)
-        load_btn.grid(row=0, column=0, sticky="w")
-
-        self.playlists_listbox = tk.Listbox(
-            playlists_frame,
-            selectmode="extended",
-            exportselection=False,
-        )
-        self.playlists_listbox.grid(row=1, column=0, sticky="nsew")
-        pl_scrollbar = ttk.Scrollbar(playlists_frame, orient="vertical", command=self.playlists_listbox.yview)
-        pl_scrollbar.grid(row=1, column=1, sticky="ns")
-        self.playlists_listbox.configure(yscrollcommand=pl_scrollbar.set)
-
-        # Run button
-        self.run_button = ttk.Button(main, text="Export", command=self._on_run)
-        self.run_button.grid(row=6, column=0, columnspan=3, pady=(10, 0))
-
-        # Log output
-        ttk.Label(main, text="Log").grid(row=7, column=0, sticky="nw", pady=(10, 0))
-        log_frame = ttk.Frame(main)
-        log_frame.grid(row=7, column=1, columnspan=2, sticky="nsew", pady=(10, 0))
-
-        main.rowconfigure(7, weight=1)
-        log_frame.rowconfigure(0, weight=1)
-        log_frame.columnconfigure(0, weight=1)
-
-        self.log_text = tk.Text(log_frame, height=10, wrap="word", state="disabled")
-        self.log_text.grid(row=0, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self.log_text.configure(yscrollcommand=scrollbar.set)
-
-    def _load_last_settings(self) -> None:
-        """Load last used settings from a JSON file."""
-        if not self._settings_file.exists():
-            return
-        try:
-            import json
-
-            with self._settings_file.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            self.db_path_var.set(data.get("db_path", ""))
-            self.output_path_var.set(data.get("output_path", ""))
-            self.db_key_var.set(data.get("db_key", ""))
-            self.verbose_var.set(data.get("verbose", True))
-            self.force_var.set(data.get("force", False))
-            self.roman_var.set(data.get("roman", True))
-            self.bpm_var.set(data.get("bpm", True))
-            self.orderby_var.set(data.get("orderby", "bpm"))
-            # playlists selection is not auto-restored because it depends on loaded DB state
-        except Exception:
-            # fail silently; we don't want to block startup
-            return
-
-    def _save_last_settings(self) -> None:
-        """Persist current settings to a JSON file."""
-        try:
-            import json
-
-            data = {
-                "db_path": self.db_path_var.get(),
-                "output_path": self.output_path_var.get(),
-                "db_key": self.db_key_var.get(),
-                "verbose": self.verbose_var.get(),
-                "force": self.force_var.get(),
-                "roman": self.roman_var.get(),
-                "bpm": self.bpm_var.get(),
-                "orderby": self.orderby_var.get(),
-            }
-            with self._settings_file.open("w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception:
-            # Do not raise to UI; best-effort
-            pass
-
-    def _browse_db(self) -> None:
-        filename = filedialog.askopenfilename(title="Select Rekordbox DB file")
-        if filename:
-            self.db_path_var.set(filename)
-
-    def _browse_output(self) -> None:
-        filename = filedialog.asksaveasfilename(title="Select output XML file", defaultextension=".xml", filetypes=[("XML files", "*.xml"), ("All files", "*.*")])
-        if filename:
-            self.output_path_var.set(filename)
-
-    def _append_log(self, message: str) -> None:
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", message + "\n")
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
+    # ----- Playlist loading -----
 
     def _load_playlists(self) -> None:
-        """Load playlists from Rekordbox database and populate the listbox.
-
-        Uses the same database auto-detection behavior as the CLI when no
-        explicit path is provided. Only non-folder playlists are selectable.
-        """
-        db_path = self.db_path_var.get().strip() or None
-        db_path_str: Optional[str] = db_path if db_path else None
-
+        """Load playlists from Rekordbox DB and build the tree model."""
+        self._log_message("Rekordbox データベースを読み込み中...")
         try:
-            db = RekordboxDatabase(db_path_str)
+            db = RekordboxDatabase()
             pls = db.get_playlist().all()
-        except Exception as e:  # noqa: BLE001
-            messagebox.showerror("Error", f"Failed to load playlists: {e}")
+        except Exception as e:
+            self._log_message(f"DB読み込みエラー: {e}")
             return
 
         id_map = {pl.ID: pl for pl in pls}
-        parent_map: dict = {}
+        parent_map: Dict[Any, list] = {}
         for pl in pls:
             parent_map.setdefault(pl.ParentID, []).append(pl)
-
         for children in parent_map.values():
             children.sort(key=lambda x: x.Name)
 
-        rows: List[dict] = []
+        # Find root parents (IDs not in id_map)
+        root_parents = [pid for pid in parent_map if pid not in id_map]
 
-        def traverse(pid: Optional[int], depth: int, parent_path: str) -> None:
+        # Load saved settings before building tree
+        saved = self._load_settings()
+
+        # Block signals during model build to avoid cascading checks
+        self._model.blockSignals(True)
+
+        def build_tree(parent_item: QStandardItem, pid: Any, parent_path: str) -> None:
             for pl in parent_map.get(pid, []):
-                name_indented = "  " * depth + pl.Name
                 path_str = f"{parent_path}/{pl.Name}" if parent_path else pl.Name
-                rows.append(
-                    {
-                        "id": pl.ID,
-                        "name": name_indented,
-                        "is_folder": pl.is_folder,
-                        "parent_id": pl.ParentID,
-                        "path": path_str,
-                    }
-                )
-                traverse(pl.ID, depth + 1, path_str)
+                is_folder = pl.is_folder
 
-        root_parents = [pid for pid in parent_map.keys() if pid not in id_map]
+                # Column 0: Checkbox + name
+                name_item = QStandardItem(pl.Name)
+                name_item.setEditable(False)
+                name_item.setCheckable(True)
+                name_item.setData(path_str, ROLE_PATH)
+                name_item.setData(is_folder, ROLE_IS_FOLDER)
+                name_item.setData(pl.ID, ROLE_PL_ID)
+
+                # Restore check state from saved settings
+                saved_selected = saved.get("selected_playlists", [])
+                if path_str in saved_selected:
+                    name_item.setCheckState(Qt.Checked)
+                else:
+                    name_item.setCheckState(Qt.Unchecked)
+
+                if is_folder:
+                    # Folder: option columns are empty/disabled
+                    roman_item = QStandardItem("")
+                    roman_item.setEnabled(False)
+                    roman_item.setEditable(False)
+                    bpm_item = QStandardItem("")
+                    bpm_item.setEnabled(False)
+                    bpm_item.setEditable(False)
+                    sort_item = QStandardItem("")
+                    sort_item.setEnabled(False)
+                    sort_item.setEditable(False)
+                else:
+                    # Playlist: option columns with checkboxes / combo
+                    # Restore per-playlist options
+                    pl_opts = saved.get("playlist_options", {}).get(path_str, {})
+
+                    roman_item = QStandardItem()
+                    roman_item.setCheckable(True)
+                    roman_item.setCheckState(
+                        Qt.Checked if pl_opts.get("roman", True) else Qt.Unchecked
+                    )
+                    roman_item.setEditable(False)
+
+                    bpm_item = QStandardItem()
+                    bpm_item.setCheckable(True)
+                    bpm_item.setCheckState(
+                        Qt.Checked if pl_opts.get("bpm", True) else Qt.Unchecked
+                    )
+                    bpm_item.setEditable(False)
+
+                    sort_val = pl_opts.get("orderby", "bpm")
+                    sort_label = SORT_MAP_REV.get(sort_val, "BPM昇順")
+                    sort_item = QStandardItem(sort_label)
+                    sort_item.setEditable(False)
+
+                parent_item.appendRow([name_item, roman_item, bpm_item, sort_item])
+
+                if is_folder:
+                    build_tree(name_item, pl.ID, path_str)
+
+        root = self._model.invisibleRootItem()
         for rp in root_parents:
-            traverse(rp, 0, "")
+            build_tree(root, rp, "")
 
-        self.playlists_listbox.delete(0, "end")
-        self._playlist_rows = []
-        for r in rows:
-            if r["is_folder"]:
+        self._model.blockSignals(False)
+
+        self._tree.expandAll()
+
+        # Set sort combo delegates after tree is built
+        self._setup_sort_combos(root)
+
+        # Restore output path
+        self._output_edit.setText(saved.get("output_path", ""))
+
+        count = self._count_playlists(root)
+        self._log_message(f"{count} 個のプレイリストを読み込みました")
+
+    def _setup_sort_combos(self, parent: QStandardItem) -> None:
+        """Set QComboBox widgets on sort-order column for playlist rows."""
+        for row in range(parent.rowCount()):
+            name_item = parent.child(row, COL_CHECK)
+            if not name_item:
                 continue
-            self.playlists_listbox.insert("end", r["name"])
-            self._playlist_rows.append(r)
+            is_folder = name_item.data(ROLE_IS_FOLDER)
+            sort_item = parent.child(row, COL_SORT)
+            if not is_folder and sort_item:
+                idx = self._model.indexFromItem(sort_item)
+                combo = QComboBox()
+                combo.addItems(SORT_OPTIONS)
+                # Set current value from model text
+                current_text = sort_item.text()
+                combo_idx = combo.findText(current_text)
+                if combo_idx >= 0:
+                    combo.setCurrentIndex(combo_idx)
+                self._tree.setIndexWidget(idx, combo)
+            # Recurse for children
+            if name_item.hasChildren():
+                self._setup_sort_combos(name_item)
 
-        if not self._playlist_rows:
-            self._append_log("No playlists found in database.")
-        else:
-            self._append_log(f"Loaded {len(self._playlist_rows)} playlists.")
+    def _count_playlists(self, parent: QStandardItem) -> int:
+        count = 0
+        for row in range(parent.rowCount()):
+            item = parent.child(row, COL_CHECK)
+            if item:
+                is_folder = item.data(ROLE_IS_FOLDER)
+                if not is_folder:
+                    count += 1
+                if item.hasChildren():
+                    count += self._count_playlists(item)
+        return count
 
-    def _on_run(self) -> None:
-        db_path = self.db_path_var.get().strip() or None
-        output_path = self.output_path_var.get().strip()
-        db_key = self.db_key_var.get().strip() or None
+    # ----- Checkbox cascading -----
 
+    def _on_item_changed(self, item: QStandardItem) -> None:
+        """When a folder checkbox changes, cascade to children."""
+        if item.column() != COL_CHECK:
+            return
+        is_folder = item.data(ROLE_IS_FOLDER)
+        if not is_folder:
+            return
+        # Block signals to prevent recursive triggers
+        self._model.blockSignals(True)
+        self._set_children_check(item, item.checkState())
+        self._model.blockSignals(False)
+
+    def _set_children_check(self, parent: QStandardItem, state: Qt.CheckState) -> None:
+        for row in range(parent.rowCount()):
+            child = parent.child(row, COL_CHECK)
+            if child:
+                child.setCheckState(state)
+                if child.hasChildren():
+                    self._set_children_check(child, state)
+
+    # ----- Output folder -----
+
+    def _browse_output(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "出力先フォルダを選択")
+        if folder:
+            self._output_edit.setText(folder)
+
+    # ----- Export -----
+
+    def _on_export(self) -> None:
+        output_path = self._output_edit.text().strip()
         if not output_path:
-            messagebox.showerror("Error", "Output XML file is required.")
+            QMessageBox.warning(self, "エラー", "出力先フォルダを指定してください。")
             return
 
-        # Normalize output path:
-        # - expand user (~)
-        # - if relative, make it absolute (cwd basis)
-        # - if no suffix, append .xml
-        output = Path(output_path).expanduser()
-        if not output.is_absolute():
-            output = Path.cwd() / output
-        if output.suffix.lower() != ".xml":
-            output = output.with_suffix(".xml")
-        try:
-            output.parent.mkdir(parents=True, exist_ok=True)
-        except Exception as e:  # noqa: BLE001
-            messagebox.showerror("Error", f"Failed to create output directory: {e}")
-            return
-
-        if output.exists():
-            if self.force_var.get():
-                if output.is_file():
-                    try:
-                        output.unlink()
-                    except Exception as e:  # noqa: BLE001
-                        messagebox.showerror("Error", f"Failed to remove existing file: {e}")
-                        return
-                else:
-                    messagebox.showerror("Error", f"Output path exists and is not a file: {output}")
-                    return
-            else:
-                if not messagebox.askyesno("Overwrite?", f"Output file {output} already exists. Overwrite?"):
-                    return
-                if output.is_file():
-                    try:
-                        output.unlink()
-                    except Exception as e:  # noqa: BLE001
-                        messagebox.showerror("Error", f"Failed to remove existing file: {e}")
-                        return
-                else:
-                    messagebox.showerror("Error", f"Output path exists and is not a file: {output}")
-                    return
-
-        playlists: Optional[List[str]] = None
-        if self._playlist_rows and self.playlists_listbox.curselection():
-            # Use hierarchical path strings so exporter can match by path reliably
-            playlists = [
-                self._playlist_rows[idx]["path"]
-                for idx in self.playlists_listbox.curselection()
-            ]
-
-        verbose = self.verbose_var.get()
-        roman = self.roman_var.get()
-        bpm = self.bpm_var.get()
-        orderby = self.orderby_var.get() or "default"
-
-        self.run_button.config(state="disabled")
-        self._append_log("Starting export...")
-
-        def worker() -> None:
+        output_dir = Path(output_path)
+        if not output_dir.exists():
             try:
-                export_rekordbox_db_to_xml(
-                    db_path,
-                    str(output),
-                    db_key,
-                    verbose,
-                    roman,
-                    bpm,
-                    orderby,
-                    playlists,
-                )
-                self.after(0, lambda: self._append_log("Export completed successfully."))
-            except Exception as e:  # noqa: BLE001
-                def on_error(err=e) -> None:
-                    self._append_log(f"Error: {err}")
-                    messagebox.showerror("Error", f"Failed to export: {err}")
+                output_dir.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                QMessageBox.critical(self, "エラー", f"フォルダ作成に失敗: {e}")
+                return
 
-                self.after(0, on_error)
-            finally:
-                self.after(0, lambda: self.run_button.config(state="normal"))
-                self.after(0, self._save_last_settings)
+        xml_path = str(output_dir / "rekordbox.xml")
 
-        threading.Thread(target=worker, daemon=True).start()
+        # Collect selected playlists
+        selected_paths: List[str] = []
+        root = self._model.invisibleRootItem()
+        self._collect_selected(root, selected_paths)
+
+        if not selected_paths:
+            QMessageBox.warning(self, "エラー", "エクスポートするプレイリストを選択してください。")
+            return
+
+        # Collect per-playlist options dict
+        pl_options: Dict[str, dict] = {}
+        self._collect_all_options(root, pl_options)
+
+        # Save settings before export
+        self._save_settings()
+
+        self._export_btn.setEnabled(False)
+        self._progress.setVisible(True)
+        self._log_message(f"エクスポート対象: {len(selected_paths)} プレイリスト")
+
+        # Create worker with per-playlist options
+        worker = ExportWorker(
+            db_path=None,
+            output_path=xml_path,
+            playlists=selected_paths,
+            playlist_options=pl_options,
+        )
+        thread = QThread()
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._log_message)
+        worker.error.connect(self._on_export_error)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._on_export_done)
+
+        self._export_thread = thread
+        self._export_worker = worker
+        thread.start()
+
+    def _collect_selected(self, parent: QStandardItem, result: List[str]) -> None:
+        """Collect path strings of checked items (folders and playlists).
+
+        When a folder is checked, its path is included and children are
+        skipped because the core export logic automatically includes all
+        descendants of a selected folder — matching CLI behaviour.
+        """
+        for row in range(parent.rowCount()):
+            item = parent.child(row, COL_CHECK)
+            if not item:
+                continue
+            if item.checkState() != Qt.Checked:
+                # Still recurse into unchecked folders; a child may be checked
+                if item.hasChildren():
+                    self._collect_selected(item, result)
+                continue
+            path_str = item.data(ROLE_PATH)
+            is_folder = item.data(ROLE_IS_FOLDER)
+            if is_folder:
+                # Pass folder path — core logic includes all descendants
+                if path_str:
+                    result.append(path_str)
+                # No need to recurse; descendants are covered by the folder
+            else:
+                if path_str:
+                    result.append(path_str)
+
+    def _collect_options(self, parent: QStandardItem) -> List[dict]:
+        """Collect per-playlist options for checked playlists."""
+        results: List[dict] = []
+        for row in range(parent.rowCount()):
+            item = parent.child(row, COL_CHECK)
+            if not item:
+                continue
+            is_folder = item.data(ROLE_IS_FOLDER)
+            if item.checkState() == Qt.Checked and not is_folder:
+                roman_item = parent.child(row, COL_ROMAN)
+                bpm_item = parent.child(row, COL_BPM)
+                sort_item = parent.child(row, COL_SORT)
+
+                roman = roman_item.checkState() == Qt.Checked if roman_item else True
+                bpm = bpm_item.checkState() == Qt.Checked if bpm_item else True
+
+                # Read combo widget value
+                orderby = "bpm"
+                if sort_item:
+                    idx = self._model.indexFromItem(sort_item)
+                    widget = self._tree.indexWidget(idx)
+                    if isinstance(widget, QComboBox):
+                        orderby = SORT_MAP.get(widget.currentText(), "bpm")
+
+                results.append({"roman": roman, "bpm": bpm, "orderby": orderby})
+            if item.hasChildren():
+                results.extend(self._collect_options(item))
+        return results
+
+    @Slot(str)
+    def _on_export_error(self, msg: str) -> None:
+        self._log_message(f"エラー: {msg}")
+        QMessageBox.critical(self, "エクスポートエラー", msg)
+
+    @Slot()
+    def _on_export_done(self) -> None:
+        self._export_btn.setEnabled(True)
+        self._progress.setVisible(False)
+        self._export_thread = None
+
+    # ----- Logging -----
+
+    def _log_message(self, message: str) -> None:
+        self._log.appendPlainText(message)
+
+    # ----- Settings persistence -----
+
+    def _load_settings(self) -> dict:
+        """Load saved settings from JSON file."""
+        if not SETTINGS_FILE.exists():
+            return {}
+        try:
+            with SETTINGS_FILE.open("r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _save_settings(self) -> None:
+        """Save current settings to JSON file."""
+        root = self._model.invisibleRootItem()
+
+        # Collect selected playlist paths
+        selected: List[str] = []
+        self._collect_checked_paths(root, selected)
+
+        # Collect per-playlist options
+        options: Dict[str, dict] = {}
+        self._collect_all_options(root, options)
+
+        data = {
+            "output_path": self._output_edit.text().strip(),
+            "selected_playlists": selected,
+            "playlist_options": options,
+        }
+        try:
+            with SETTINGS_FILE.open("w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+    def _collect_checked_paths(self, parent: QStandardItem, result: List[str]) -> None:
+        """Collect path strings of all checked items (folders + playlists)."""
+        for row in range(parent.rowCount()):
+            item = parent.child(row, COL_CHECK)
+            if not item:
+                continue
+            if item.checkState() == Qt.Checked:
+                path_str = item.data(ROLE_PATH)
+                if path_str:
+                    result.append(path_str)
+            if item.hasChildren():
+                self._collect_checked_paths(item, result)
+
+    def _collect_all_options(self, parent: QStandardItem, result: Dict[str, dict]) -> None:
+        """Collect options for all playlist (non-folder) items."""
+        for row in range(parent.rowCount()):
+            item = parent.child(row, COL_CHECK)
+            if not item:
+                continue
+            is_folder = item.data(ROLE_IS_FOLDER)
+            if not is_folder:
+                path_str = item.data(ROLE_PATH)
+                roman_item = parent.child(row, COL_ROMAN)
+                bpm_item = parent.child(row, COL_BPM)
+                sort_item = parent.child(row, COL_SORT)
+
+                roman = roman_item.checkState() == Qt.Checked if roman_item else True
+                bpm = bpm_item.checkState() == Qt.Checked if bpm_item else True
+
+                orderby = "bpm"
+                if sort_item:
+                    idx = self._model.indexFromItem(sort_item)
+                    widget = self._tree.indexWidget(idx)
+                    if isinstance(widget, QComboBox):
+                        orderby = SORT_MAP.get(widget.currentText(), "bpm")
+
+                if path_str:
+                    result[path_str] = {
+                        "roman": roman,
+                        "bpm": bpm,
+                        "orderby": orderby,
+                    }
+            if item.hasChildren():
+                self._collect_all_options(item, result)
+
+    def closeEvent(self, event) -> None:
+        """Save settings when window is closed."""
+        self._save_settings()
+        super().closeEvent(event)
 
 
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 def main() -> None:
-    app = RekordboxExporterGUI()
-    app.geometry("800x600")
-    app.mainloop()
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
