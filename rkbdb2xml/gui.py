@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 import psutil
 from PySide6.QtCore import (
+    QModelIndex,
     QObject,
     QThread,
     QUrl,
@@ -47,6 +48,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSplitter,
+    QTableView,
     QToolButton,
     QTreeView,
     QVBoxLayout,
@@ -181,6 +183,7 @@ class MainWindow(QMainWindow):
 
         self._export_thread: Optional[QThread] = None
         self._is_updating_checks = False
+        self._current_preview_item: Optional[QStandardItem] = None
 
         self._build_ui()
         self._check_rekordbox_status()
@@ -286,9 +289,20 @@ class MainWindow(QMainWindow):
         toolbar_row.addStretch(1)
         layout.addLayout(toolbar_row)
 
-        # --- Tree view ---
+        # --- Main Splitter (Left: Playlist Tree, Right: Track Preview) ---
+        self._splitter = QSplitter(Qt.Horizontal)
+
+        # Left panel: Playlist tree
+        tree_container = QWidget()
+        tree_layout = QVBoxLayout(tree_container)
+        tree_layout.setContentsMargins(0, 0, 0, 0)
+        tree_layout.setSpacing(4)
+        tree_title = QLabel("📂 プレイリスト一覧 (チェックでエクスポート対象選択)")
+        tree_title.setStyleSheet("font-weight: bold; color: #495057;")
+        tree_layout.addWidget(tree_title)
+
         self._model = QStandardItemModel()
-        self._model.setHorizontalHeaderLabels(["プレイリスト", "ローマ字変換", "BPM付加", "曲の並び順"])
+        self._model.setHorizontalHeaderLabels(["プレイリスト", "ローマ字", "BPM付加", "曲の並び順"])
 
         self._tree = QTreeView()
         self._tree.setModel(self._model)
@@ -304,7 +318,7 @@ class MainWindow(QMainWindow):
         # Tooltips on headers
         self._tree.header().setToolTip(
             "プレイリスト: エクスポートする対象を選択\n"
-            "ローマ字変換: 日本語の曲名・アーティスト名・アルバム名を半角ローマ字に変換\n"
+            "ローマ字: 日本語の曲名・アーティスト名・アルバム名を半角ローマ字に変換\n"
             "BPM付加: 曲名先頭にテンポ数値を付与 (例: '128 曲名')\n"
             "曲の並び順: プレイリスト内の曲順を指定"
         )
@@ -312,7 +326,43 @@ class MainWindow(QMainWindow):
         # Connect item-changed for checkbox cascading
         self._model.itemChanged.connect(self._on_item_changed)
 
-        layout.addWidget(self._tree, 1)
+        tree_layout.addWidget(self._tree, 1)
+        self._splitter.addWidget(tree_container)
+
+        # Right panel: Track preview table
+        preview_container = QWidget()
+        preview_layout = QVBoxLayout(preview_container)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(4)
+
+        self._preview_header = QLabel("🎵 選択中プレイリストの曲プレビュー (変換前 → 変換後イメージ)")
+        self._preview_header.setStyleSheet("font-weight: bold; color: #1a73e8;")
+        preview_layout.addWidget(self._preview_header)
+
+        self._preview_model = QStandardItemModel()
+        self._preview_model.setHorizontalHeaderLabels([
+            "#", "元の曲名", "変換後タイトル (出力タグ/XML)", "アーティスト", "BPM", "ファイル状態"
+        ])
+
+        self._preview_table = QTableView()
+        self._preview_table.setModel(self._preview_model)
+        self._preview_table.setAlternatingRowColors(True)
+        self._preview_table.setSelectionBehavior(QTableView.SelectRows)
+        self._preview_table.setEditTriggers(QTableView.NoEditTriggers)
+        self._preview_table.horizontalHeader().setStretchLastSection(False)
+        self._preview_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self._preview_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)
+        self._preview_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self._preview_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Interactive)
+        self._preview_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self._preview_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        preview_layout.addWidget(self._preview_table, 1)
+
+        self._splitter.addWidget(preview_container)
+        self._splitter.setSizes([450, 550])
+
+        layout.addWidget(self._splitter, 1)
+
 
         # --- Export button row ---
         export_row = QHBoxLayout()
@@ -477,6 +527,19 @@ class MainWindow(QMainWindow):
         count = self._count_playlists(root)
         self._log_message(f"{count} 個のプレイリストを読み込みました")
 
+        # Connect tree selection to track preview
+        self._tree.selectionModel().currentChanged.connect(self._on_tree_selection_changed)
+
+        # Select first available playlist for preview if available
+        for row in range(root.rowCount()):
+            item = root.child(row, COL_CHECK)
+            if item and not item.data(ROLE_IS_FOLDER):
+                idx = self._model.indexFromItem(item)
+                self._tree.selectionModel().setCurrentIndex(
+                    idx, self._tree.selectionModel().SelectionFlag.ClearAndSelect
+                )
+                break
+
     def _setup_sort_combos(self, parent: QStandardItem) -> None:
         """Set QComboBox widgets on sort-order column for playlist rows."""
         for row in range(parent.rowCount()):
@@ -493,9 +556,161 @@ class MainWindow(QMainWindow):
                 combo_idx = combo.findText(current_text)
                 if combo_idx >= 0:
                     combo.setCurrentIndex(combo_idx)
+                # Re-render preview when sort order changed
+                combo.currentIndexChanged.connect(self._on_option_changed_refresh_preview)
                 self._tree.setIndexWidget(idx, combo)
             if name_item.hasChildren():
                 self._setup_sort_combos(name_item)
+
+    def _on_option_changed_refresh_preview(self) -> None:
+        """Refresh track preview when an option (roman, bpm, sort) changes."""
+        if self._current_preview_item:
+            self._update_track_preview(self._current_preview_item)
+
+    def _on_tree_selection_changed(self, current: QModelIndex, previous: QModelIndex) -> None:
+        """Update track preview when a playlist or folder is selected."""
+        if not current.isValid():
+            return
+        name_idx = current.siblingAtColumn(COL_CHECK)
+        item = self._model.itemFromIndex(name_idx)
+        if item:
+            self._update_track_preview(item)
+
+    def _update_track_preview(self, item: QStandardItem) -> None:
+        """Fetch tracks for selected playlist and populate preview table."""
+        self._current_preview_item = item
+        if not item:
+            return
+
+        is_folder = item.data(ROLE_IS_FOLDER)
+        pl_id = item.data(ROLE_PL_ID)
+        path_str = item.data(ROLE_PATH) or item.text()
+
+        self._preview_model.removeRows(0, self._preview_model.rowCount())
+
+        if is_folder:
+            self._preview_header.setText(
+                f"📁 フォルダ: {path_str} (※ プレイリストを選択すると曲プレビューが表示されます)"
+            )
+            return
+
+        # Read current option settings from the tree row
+        parent = item.parent() or self._model.invisibleRootItem()
+        row = item.row()
+        roman_item = parent.child(row, COL_ROMAN)
+        bpm_item = parent.child(row, COL_BPM)
+        sort_item = parent.child(row, COL_SORT)
+
+        use_roman = (
+            roman_item.checkState() == Qt.Checked
+            if (roman_item and roman_item.isCheckable())
+            else True
+        )
+        use_bpm = (
+            bpm_item.checkState() == Qt.Checked
+            if (bpm_item and bpm_item.isCheckable())
+            else True
+        )
+
+        sort_text = "BPM昇順"
+        if sort_item:
+            idx = self._model.indexFromItem(sort_item)
+            widget = self._tree.indexWidget(idx)
+            if isinstance(widget, QComboBox):
+                sort_text = widget.currentText()
+            elif sort_item.text():
+                sort_text = sort_item.text()
+        orderby = SORT_MAP.get(sort_text, "bpm")
+
+        # Query tracks from Rekordbox DB
+        try:
+            db = RekordboxDatabase()
+            pl_obj = None
+            for p in db.get_playlist().all():
+                if p.ID == pl_id:
+                    pl_obj = p
+                    break
+            if not pl_obj:
+                self._preview_header.setText(f"🎵 プレイリスト: {path_str} (0 曲)")
+                return
+
+            entries = db.get_playlist_contents(pl_obj).all()
+            if orderby == "bpm":
+                def safe_bpm(entry):
+                    b = getattr(entry, "BPM", None)
+                    return b if b else 0
+                entries = sorted(entries, key=safe_bpm)
+
+            self._preview_header.setText(
+                f"🎵 プレイリスト: {path_str} (全 {len(entries)} 曲)  "
+                f"[ローマ字: {'ON' if use_roman else 'OFF'}, BPM付加: {'ON' if use_bpm else 'OFF'}, 順序: {sort_text}]"
+            )
+
+            from rkbdb2xml.rkbdb2xml import RomanConverter, RekordboxXMLExporter
+            roman_conv = RomanConverter() if use_roman else None
+            path_resolver = RekordboxXMLExporter.__new__(RekordboxXMLExporter)
+
+            for i, entry in enumerate(entries, 1):
+                raw_title = getattr(entry, "Title", "") or ""
+                raw_artist = (
+                    getattr(entry, "ArtistName", "")
+                    or getattr(entry, "Artist", "")
+                    or ""
+                )
+                raw_bpm = getattr(entry, "BPM", None)
+                loc = getattr(entry, "FolderPath", None)
+
+                conv_title = raw_title
+                conv_artist = raw_artist
+                if use_roman and roman_conv:
+                    if not conv_title.isascii():
+                        try:
+                            conv_title = roman_conv.to_roman(conv_title)
+                        except Exception:
+                            pass
+                    if not conv_artist.isascii():
+                        try:
+                            conv_artist = roman_conv.to_roman(conv_artist)
+                        except Exception:
+                            pass
+
+                bpm_val = None
+                if raw_bpm:
+                    try:
+                        bpm_val = float(raw_bpm) / 100.0
+                    except Exception:
+                        pass
+
+                if use_bpm and bpm_val:
+                    conv_title = f"{int(bpm_val)} {conv_title}"
+
+                # Check file existence
+                file_status = "❌ なし"
+                if loc:
+                    try:
+                        p = path_resolver._resolve_file_path(loc)
+                        if p and p.exists():
+                            file_status = "⭕ 存在"
+                    except Exception:
+                        pass
+
+                num_item = QStandardItem(str(i))
+                orig_title_item = QStandardItem(raw_title)
+                conv_title_item = QStandardItem(conv_title)
+                artist_item = QStandardItem(conv_artist)
+                bpm_item_table = QStandardItem(f"{bpm_val:.1f}" if bpm_val else "-")
+                file_item = QStandardItem(file_status)
+
+                conv_title_item.setToolTip(f"出力ファイル内タグ & XML名: {conv_title}")
+                if loc:
+                    file_item.setToolTip(f"元ファイルパス: {loc}")
+
+                self._preview_model.appendRow([
+                    num_item, orig_title_item, conv_title_item, artist_item, bpm_item_table, file_item
+                ])
+
+        except Exception as e:
+            self._preview_header.setText(f"🎵 プレイリスト: {path_str} (読み込みエラー: {e})")
 
     def _count_playlists(self, parent: QStandardItem) -> int:
         count = 0
@@ -526,6 +741,7 @@ class MainWindow(QMainWindow):
         """Batch set checkbox state for an option column across all playlists."""
         root = self._model.invisibleRootItem()
         self._apply_option_state(root, col, state)
+        self._on_option_changed_refresh_preview()
 
     def _apply_option_state(self, parent: QStandardItem, col: int, state: Qt.CheckState) -> None:
         for row in range(parent.rowCount()):
@@ -544,6 +760,8 @@ class MainWindow(QMainWindow):
         """Batch set sort order combo value for all playlists."""
         root = self._model.invisibleRootItem()
         self._apply_sort_text(root, sort_text)
+        self._on_option_changed_refresh_preview()
+
 
     def _apply_sort_text(self, parent: QStandardItem, sort_text: str) -> None:
         for row in range(parent.rowCount()):
@@ -569,7 +787,13 @@ class MainWindow(QMainWindow):
         """When a folder or playlist checkbox changes, cascade to children and parents."""
         if getattr(self, "_is_updating_checks", False):
             return
-        if item.column() != COL_CHECK:
+
+        col = item.column()
+        if col in (COL_ROMAN, COL_BPM):
+            self._on_option_changed_refresh_preview()
+            return
+
+        if col != COL_CHECK:
             return
 
         self._is_updating_checks = True
@@ -587,6 +811,7 @@ class MainWindow(QMainWindow):
                 self._update_parent_check_state(parent)
         finally:
             self._is_updating_checks = False
+
 
     def _set_children_check(self, parent: QStandardItem, state: Qt.CheckState) -> None:
         """Recursively set check state on all descendant items."""

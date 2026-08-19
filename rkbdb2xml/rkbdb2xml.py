@@ -124,15 +124,115 @@ class RekordboxXMLExporter:
         self._add_tracks_to_collection(xml)
         self.verbose(f"Saving XML to {path}")
         xml.save(path)
-        # ファイルコピー用出力ディレクトリを作成し、元ファイルを複製
-        export_dir = Path(path).with_suffix("")
+        
+        # Files are copied directly into the same export directory as the XML
+        output_file = Path(path)
+        export_dir = output_file.parent
         export_dir.mkdir(parents=True, exist_ok=True)
-        # Initialize mapping for updating XML locations
+        
         self._copy_map: Dict[str, Path] = {}
         self.verbose(f"Copying files to {export_dir}")
         self._copy_files(export_dir)
         # Update XML Location attributes to point to copied files
         self._update_locations(path, export_dir)
+
+    def _build_path_map(self, all_playlists) -> Dict[Any, str]:
+        """Build hierarchical path map (ID -> 'Folder/Subfolder/Playlist') matching GUI."""
+        id_map = {pl.ID: pl for pl in all_playlists}
+        parent_map: Dict[Any, list] = {}
+        for pl in all_playlists:
+            parent_map.setdefault(pl.ParentID, []).append(pl)
+        for children in parent_map.values():
+            children.sort(key=lambda x: x.Name)
+
+        root_parents = [pid for pid in parent_map if pid not in id_map]
+        path_map: Dict[Any, str] = {}
+
+        def traverse(pid: Any, current_path: str) -> None:
+            for pl in parent_map.get(pid, []):
+                p_str = f"{current_path}/{pl.Name}" if current_path else pl.Name
+                path_map[pl.ID] = p_str
+                traverse(pl.ID, p_str)
+
+        for rp in root_parents:
+            traverse(rp, "")
+        return path_map
+
+    def _add_playlists(self, xml) -> None:
+        """
+        Add playlists to the XML.
+
+        Args:
+            xml: The RekordboxXml instance
+        """
+        all_playlists = self.db.get_playlist().all()
+        id_map_all = {pl.ID: pl for pl in all_playlists}
+        self._playlist_path_map = self._build_path_map(all_playlists)
+
+        # Filter playlists if specs provided (include descendants & ancestors)
+        if self._playlist_specs:
+            target_ids = set()
+            for spec in self._playlist_specs:
+                if spec.isdigit() and int(spec) in id_map_all:
+                    target_ids.add(int(spec))
+                else:
+                    for pid, ppath in self._playlist_path_map.items():
+                        if (
+                            ppath == spec
+                            or ppath.endswith(f"/{spec}")
+                            or spec == ppath.split("/")[-1]
+                        ):
+                            target_ids.add(pid)
+
+            # Build parent->children map
+            parent_map_full: Dict[Any, List] = {}
+            for pl in all_playlists:
+                parent_map_full.setdefault(pl.ParentID, []).append(pl)
+
+            include_ids = set()
+
+            def collect_desc(pid):
+                include_ids.add(pid)
+                for child in parent_map_full.get(pid, []):
+                    collect_desc(child.ID)
+
+            for tid in target_ids:
+                collect_desc(tid)
+
+            # Include ancestor folders
+            for pid in list(include_ids):
+                curr = id_map_all.get(pid)
+                while curr:
+                    include_ids.add(curr.ID)
+                    curr = id_map_all.get(curr.ParentID)
+
+            all_playlists = [pl for pl in all_playlists if pl.ID in include_ids]
+
+        # Group by parent ID for XML hierarchy generation
+        parent_map: Dict[Any, List] = {}
+        for pl in all_playlists:
+            parent_map.setdefault(pl.ParentID, []).append(pl)
+        for children in parent_map.values():
+            children.sort(key=lambda x: x.Name)
+
+        id_map = {pl.ID: pl for pl in all_playlists}
+        root_parents = [pid for pid in parent_map if pid not in id_map]
+
+        # Queue for breadth-first building: (parent_db_id, parent_xml_node)
+        queue = [(rp, xml._root_node) for rp in root_parents]
+
+        while queue:
+            parent_id, parent_xml = queue.pop(0)
+            children = parent_map.get(parent_id, [])
+            for child in children:
+                self.verbose(f"adding playlist: {child.Name} (parent: {parent_id})")
+                if child.is_folder:
+                    child_xml = parent_xml.add_playlist_folder(self._romanize(child.Name))
+                    queue.append((child.ID, child_xml))
+                elif child.is_playlist:
+                    pl_xml = parent_xml.add_playlist(self._romanize(child.Name))
+                    self._add_playlists_to_playlist(pl_xml, child)
+
 
     def _add_tracks_to_collection(self, xml) -> None:
         """Add all tracks to the XML collection."""
@@ -297,109 +397,6 @@ class RekordboxXMLExporter:
             "LabelName": "Label",  # DjmdContent attribute
             "Mix": "Mix",
         }
-
-    def _add_playlists(self, xml) -> None:
-        """
-        Add playlists to the XML.
-
-        ツリー構造を分析してからXMLに出力する
-        ID=0のプレイリストはルートフォルダ
-
-        Args:
-            xml: The RekordboxXml instance
-        """
-
-        all_playlists = self.db.get_playlist().all()
-        # Filter playlists if specs provided (include descendants & ancestors)
-        if self._playlist_specs:
-            orig_playlists = all_playlists
-            id_map = {pl.ID: pl for pl in orig_playlists}
-            # Build full path for each playlist
-            path_map: Dict[Any, str] = {}
-            for pl in orig_playlists:
-                parts = [pl.Name]
-                pid = pl.ParentID
-                while pid in id_map:
-                    parent = id_map[pid]
-                    parts.insert(0, parent.Name)
-                    pid = parent.ParentID
-                path_map[pl.ID] = "/".join(parts)
-            # Determine initial target IDs from specs
-            target_ids = set()
-            matched_specs = set()
-            for spec in self._playlist_specs:
-                if spec.isdigit():
-                    sid = int(spec)
-                    if sid in id_map:
-                        target_ids.add(sid)
-                        matched_specs.add(spec)
-                else:
-                    for pid, ppath in path_map.items():
-                        if ppath == spec:
-                            target_ids.add(pid)
-                            matched_specs.add(spec)
-            # 無効な指定をエラーとする
-            unmatched = [spec for spec in self._playlist_specs if spec not in matched_specs]
-            if unmatched:
-                raise ValueError(f"Invalid playlist spec(s): {', '.join(unmatched)}")
-            # Build parent->children map
-            parent_map: Dict[Any, List] = {}
-            for pl in orig_playlists:
-                parent_map.setdefault(pl.ParentID, []).append(pl)
-            # Collect include IDs (descendants and ancestors)
-            include_ids = set()
-            def collect_desc(pid):
-                include_ids.add(pid)
-                for child in parent_map.get(pid, []):
-                    collect_desc(child.ID)
-            for tid in target_ids:
-                collect_desc(tid)
-            # Include ancestor folders
-            for pid in list(include_ids):
-                curr = id_map.get(pid)
-                while curr:
-                    include_ids.add(curr.ID)
-                    curr = id_map.get(curr.ParentID)
-            all_playlists = [pl for pl in orig_playlists if pl.ID in include_ids]
-
-        # Build path_map for all playlists (needed for per-playlist options)
-        all_for_path = self.db.get_playlist().all()
-        id_map_all = {pl.ID: pl for pl in all_for_path}
-        self._playlist_path_map: Dict[Any, str] = {}
-        for pl in all_for_path:
-            parts = [pl.Name]
-            pid = pl.ParentID
-            while pid in id_map_all:
-                parent = id_map_all[pid]
-                parts.insert(0, parent.Name)
-                pid = parent.ParentID
-            self._playlist_path_map[pl.ID] = "/".join(parts)
-
-        db_root = DjmdPlaylist()
-        db_root.ID = "root"
-        db_root.Name = "root"
-        root = xml._root_node
-
-        # db/xml playlist pair list
-        db_xml_playlist_tuple_cue = [(db_root, root)]
-
-        # find child folders, add to child, and remove them from all_playlists
-        while db_xml_playlist_tuple_cue:
-            parent, parent_xml = db_xml_playlist_tuple_cue[-1]
-            # 親IDが一致する子ノードをすべて抽出
-            children = [pl for pl in all_playlists if pl.ParentID == parent.ID]
-            if not children:
-                db_xml_playlist_tuple_cue.pop()
-                continue
-            for child in children:
-                self.verbose(f"adding playlist: {child} (parent: {parent.ID})")
-                if child.is_folder:
-                    child_xml = parent_xml.add_playlist_folder(self._romanize(child.Name))
-                    db_xml_playlist_tuple_cue.append((child, child_xml))
-                elif child.is_playlist:
-                    pl_xml = parent_xml.add_playlist(self._romanize(child.Name))
-                    self._add_playlists_to_playlist(pl_xml, child)
-                all_playlists.remove(child)
 
     def _resolve_file_path(self, loc: Optional[str]) -> Optional[Path]:
         """Resolve a Rekordbox FolderPath URI or local path string to a valid Path object."""

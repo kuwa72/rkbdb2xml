@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rkbdb2xml"
-version = "0.2.1"
+version = "0.3.0"
 description = "Export Rekordbox database to XML format"
 readme = "README.md"
 authors = [
@@ -20,6 +20,10 @@ dependencies = [
     "pyrekordbox>=0.4.0",
     "rich>=10.0.0",
     "PySide6>=6.5.0",
+    "mutagen>=1.47.0",
+    "romann>=0.1.0",
+    "psutil>=5.9.0",
+    "lxml>=4.9.0",
 ]
 
 [project.urls]
