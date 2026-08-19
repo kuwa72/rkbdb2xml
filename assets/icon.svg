@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1e293b"/>
+      <stop offset="100%" stop-color="#0f172a"/>
+    </linearGradient>
+    <linearGradient id="vinylGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#334155"/>
+      <stop offset="50%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0284c7"/>
+    </linearGradient>
+    <linearGradient id="xmlGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#d97706"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Background Rounded App Square -->
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)"/>
+  <rect width="504" height="504" x="4" y="4" rx="108" fill="none" stroke="#38bdf8" stroke-width="4" stroke-opacity="0.3"/>
+
+  <!-- Vinyl Record (Left Side) -->
+  <circle cx="210" cy="256" r="160" fill="url(#vinylGrad)" stroke="#475569" stroke-width="3"/>
+  <circle cx="210" cy="256" r="130" fill="none" stroke="#475569" stroke-width="1.5" stroke-dasharray="8,4" opacity="0.6"/>
+  <circle cx="210" cy="256" r="100" fill="none" stroke="#475569" stroke-width="1.5" stroke-dasharray="12,6" opacity="0.6"/>
+  <circle cx="210" cy="256" r="70" fill="none" stroke="#475569" stroke-width="1.5" stroke-dasharray="6,3" opacity="0.6"/>
+  
+  <!-- Vinyl Center Label -->
+  <circle cx="210" cy="256" r="45" fill="url(#accentGrad)"/>
+  <circle cx="210" cy="256" r="12" fill="#0f172a"/>
+
+  <!-- XML Document / Tag Badge (Right Side) -->
+  <g transform="translate(260, 156)">
+    <!-- Document Card -->
+    <rect width="180" height="220" rx="20" fill="#1e293b" stroke="#38bdf8" stroke-width="4" filter="drop-shadow(0 10px 15px rgba(0,0,0,0.5))"/>
+    
+    <!-- Header banner -->
+    <path d="M 0 20 C 0 8.954 8.954 0 20 0 L 160 0 C 171.046 0 180 8.954 180 20 L 180 50 L 0 50 Z" fill="url(#xmlGrad)"/>
+    <text x="90" y="34" font-family="system-ui, -apple-system, sans-serif" font-weight="900" font-size="22" fill="#ffffff" text-anchor="middle" letter-spacing="2">XML</text>
+
+    <!-- Code brackets symbol < / > -->
+    <text x="45" y="115" font-family="monospace" font-weight="bold" font-size="44" fill="#38bdf8">&lt;</text>
+    <text x="90" y="145" font-family="monospace" font-weight="bold" font-size="48" fill="#f59e0b">/</text>
+    <text x="135" y="175" font-family="monospace" font-weight="bold" font-size="44" fill="#38bdf8">&gt;</text>
+  </g>
+</svg>

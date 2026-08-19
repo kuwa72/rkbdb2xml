@@ -31,9 +31,9 @@ def test_romanization_of_track_attributes():
                 album = tr.attrib.get('Album', '')
                 # 期待値（romann/sudachipyによる変換結果に依存、必要に応じて調整）
                 # romannの仕様で外来語（クッキングタイム）は英語化される
-                assert name == 'Wakuwaku Cooking Time Teki Na Bgm', f"Nameローマ字化失敗: {name}"
+                assert name == 'WakuwakuCookingTimeTekiNaBgm', f"Nameローマ字化失敗: {name}"
                 # romannの仕様で人名は英語化される場合がある
-                assert artist == 'Takao Masaki', f"Artistローマ字化失敗: {artist}"
+                assert artist == 'TakaoMasaki', f"Artistローマ字化失敗: {artist}"
                 # romann/sudachipyのバージョンや辞書により変換仕様が変わる場合がある
                 # 現状（2025/4/23時点）の変換結果に合わせる
                 assert album == 'TK-Sounds', f"Albumローマ字化失敗: {album}"

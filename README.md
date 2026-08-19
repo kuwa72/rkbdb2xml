@@ -1,10 +1,38 @@
 # rkbdb2xml
 
-A modern tool to generate XML from Rekordbox database using pyrekordbox library.
+Rekordbox のプレイリストや楽曲データを、XMLエクスポートおよび楽曲ファイル複製・タグ変換（ローマ字変換・BPM付与）するGUI / CLIツールです。
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 
+---
+
+## 🚀 かんたんクイックスタート (GUIアプリを使う)
+
+プログラミングや黒い画面（ターミナル）の操作は不要です。アプリをダウンロードしてダブルクリックするだけで使えます。
+
+### 1. アプリのダウンロード
+[GitHub Releases 最新版](../../releases/latest) から、お使いのパソコンに合ったファイルをダウンロードしてください：
+- **Windows**: `rkbdb2xml-gui-windows-amd64.exe`
+- **macOS**: `rkbdb2xml-gui-macos-amd64.zip`（解凍して開く）
+- **Linux**: `rkbdb2xml-gui-linux-amd64`
+
+> **💡 初回起動時のセキュリティ画面について**
+> - **Windows**: 「WindowsによってPCが保護されました」と出た場合は、**「詳細情報」** をクリックして **「実行」** を押してください。
+> - **macOS**: 「開発元が未確認のため開けません」と出た場合は、アプリアイコンを **「右クリック（Controlキーを押しながらクリック）」→「開く」** を選択してください。
+
+### 2. かんたん3ステップの使い方
+1. **アプリを起動**: Rekordboxのプレイリストが自動で一覧表示されます。
+2. **設定を選ぶ**:
+   - 書き出したいプレイリストに **チェック** を入れます。
+   - 必要に応じて **「ローマ字変換」** や **「BPM付加」**、**「曲の並び順」** を設定（「⚙️ 一括設定」ボタンで一括変更も可能）。
+3. **「🚀 エクスポート開始」をクリック**:
+   - エクスポートが完了すると、保存先フォルダに `rekordbox.xml` と変換済み楽曲ファイルが生成されます。
+   - 完了後に表示される **「📂 出力先フォルダを開く」** を押すと、保存場所が直接開きます。
+
+---
+
 ## Overview
+
 
 rkbdb2xml allows you to create XML exports from your Rekordbox database in the same format as the native Rekordbox XML export feature. This can be useful for:
 
@@ -133,6 +161,32 @@ pytest --cov=rkbdb2xml
 flake8
 mypy .
 ```
+
+### Building GUI Binaries
+
+You can compile a standalone single-file GUI executable locally using PyInstaller:
+
+1. Install PyInstaller in your virtual environment:
+   ```bash
+   pip install pyinstaller
+   ```
+2. Run PyInstaller to build the executable:
+   - **Windows:**
+     ```bash
+     pyinstaller --clean --onefile --noconsole --name rkbdb2xml-gui run_gui.py
+     ```
+   - **macOS / Linux:**
+     ```bash
+     pyinstaller --clean --onefile --noconsole --name rkbdb2xml-gui run_gui.py
+     ```
+   The built binary will be generated in the `dist/` directory.
+
+### GitHub Releases (Multi-platform)
+
+The project includes a GitHub Actions workflow that automatically builds and packages the GUI executable for Windows, macOS, and Linux when you push a version tag (e.g. `v1.0.0`):
+1. Tag your commit: `git tag v1.0.0`
+2. Push the tag: `git push origin v1.0.0`
+The workflow will compile the binaries on all three operating systems and attach them as release assets.
 
 ## Contributing
 

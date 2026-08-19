@@ -6,33 +6,48 @@ output folder selection, and background export execution.
 """
 
 import json
+import os
+import platform
+import subprocess
 import sys
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import psutil
 from PySide6.QtCore import (
     QObject,
     QThread,
+    QUrl,
     Qt,
     Signal,
     Slot,
 )
-from PySide6.QtGui import QIcon, QStandardItem, QStandardItemModel
+from PySide6.QtGui import (
+    QAction,
+    QDesktopServices,
+    QFont,
+    QIcon,
+    QStandardItem,
+    QStandardItemModel,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QFileDialog,
+    QFrame,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSplitter,
+    QToolButton,
     QTreeView,
     QVBoxLayout,
     QWidget,
@@ -43,20 +58,43 @@ from pyrekordbox.db6 import Rekordbox6Database as RekordboxDatabase
 from .rkbdb2xml import export_rekordbox_db_to_xml
 
 # ---------------------------------------------------------------------------
-# Constants
+# Constants & Defaults
 # ---------------------------------------------------------------------------
 SETTINGS_FILE = Path.home() / ".rkbdb2xml_gui_settings.json"
 
+
+def get_default_output_dir() -> Path:
+    """Return a user-friendly default export directory (Desktop or Home)."""
+    desktop = Path.home() / "Desktop"
+    if desktop.exists():
+        return desktop / "Rekordbox_Export"
+    return Path.home() / "Rekordbox_Export"
+
+
+def get_app_icon() -> QIcon:
+    """Find and return application icon."""
+    # Look in assets directory
+    base_dir = Path(__file__).resolve().parent.parent
+    assets_dir = base_dir / "assets"
+    
+    # Try ICO or PNG
+    for icon_name in ("icon.ico", "icon.png", "icon_256x256.png", "icon_64x64.png"):
+        icon_path = assets_dir / icon_name
+        if icon_path.exists():
+            return QIcon(str(icon_path))
+    return QIcon()
+
+
 # Column indices for the tree model
-COL_CHECK = 0   # Checkbox + Name
-COL_ROMAN = 1   # Romanize option
-COL_BPM = 2     # BPM-in-title option
-COL_SORT = 3    # Sort order option
+COL_CHECK = 0  # Checkbox + Name
+COL_ROMAN = 1  # Romanize option
+COL_BPM = 2  # BPM-in-title option
+COL_SORT = 3  # Sort order option
 
 # Custom data roles stored on items
-ROLE_PATH = Qt.UserRole + 1       # hierarchical path string
+ROLE_PATH = Qt.UserRole + 1  # hierarchical path string
 ROLE_IS_FOLDER = Qt.UserRole + 2  # bool
-ROLE_PL_ID = Qt.UserRole + 3     # playlist ID
+ROLE_PL_ID = Qt.UserRole + 3  # playlist ID
 
 
 # ---------------------------------------------------------------------------
@@ -118,9 +156,6 @@ class ExportWorker(QObject):
                 for line in lines[-50:]:
                     self.progress.emit(line)
 
-            self.progress.emit("エクスポート完了!")
-        except Exception as e:
-            self.error.emit(str(e))
         finally:
             self.finished.emit()
 
@@ -128,8 +163,8 @@ class ExportWorker(QObject):
 # ---------------------------------------------------------------------------
 # Sort-order delegate helper
 # ---------------------------------------------------------------------------
-SORT_OPTIONS = ["デフォルト", "BPM昇順"]
-SORT_MAP = {"デフォルト": "default", "BPM昇順": "bpm"}
+SORT_OPTIONS = ["元の順序", "BPM昇順"]
+SORT_MAP = {"元の順序": "default", "BPM昇順": "bpm"}
 SORT_MAP_REV = {v: k for k, v in SORT_MAP.items()}
 
 
@@ -139,13 +174,15 @@ SORT_MAP_REV = {v: k for k, v in SORT_MAP.items()}
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("rkbdb2xml")
-        self.setMinimumSize(800, 600)
-        self.resize(1000, 700)
+        self.setWindowTitle("rkbdb2xml - Rekordbox XML エクスポーター")
+        self.setMinimumSize(850, 650)
+        self.resize(1050, 720)
+        self.setWindowIcon(get_app_icon())
 
         self._export_thread: Optional[QThread] = None
 
         self._build_ui()
+        self._check_rekordbox_status()
         self._load_playlists()
 
     # ----- UI construction -----
@@ -154,23 +191,103 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(8)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        # --- Rekordbox warning banner (hidden by default) ---
+        self._rb_warn_frame = QFrame()
+        self._rb_warn_frame.setStyleSheet(
+            "QFrame { background-color: #fff3cd; color: #856404; "
+            "border: 1px solid #ffeeba; border-radius: 4px; padding: 6px; }"
+        )
+        warn_layout = QHBoxLayout(self._rb_warn_frame)
+        warn_layout.setContentsMargins(8, 4, 8, 4)
+        self._rb_warn_label = QLabel(
+            "⚠️ 注意: Rekordbox が起動しています。データベースを正確に読み込むため、Rekordbox を終了することを推奨します。"
+        )
+        self._rb_warn_label.setStyleSheet("font-weight: bold; color: #856404;")
+        warn_layout.addWidget(self._rb_warn_label)
+        self._rb_warn_frame.setVisible(False)
+        layout.addWidget(self._rb_warn_frame)
 
         # --- Output folder row ---
         out_row = QHBoxLayout()
-        out_row.addWidget(QLabel("出力先フォルダ:"))
+        out_label = QLabel("出力先フォルダ:")
+        out_label.setStyleSheet("font-weight: bold;")
+        out_row.addWidget(out_label)
+
         self._output_edit = QLineEdit()
         self._output_edit.setPlaceholderText("エクスポート先のフォルダを選択...")
+        self._output_edit.setToolTip("XMLファイルおよび複製された楽曲ファイルが保存されるフォルダです")
         out_row.addWidget(self._output_edit, 1)
-        browse_btn = QPushButton("参照...")
+
+        browse_btn = QPushButton("📁 参照...")
+        browse_btn.setToolTip("エクスポート先のフォルダを選択します")
         browse_btn.clicked.connect(self._browse_output)
         out_row.addWidget(browse_btn)
+
+        open_folder_btn = QPushButton("📂 開く")
+        open_folder_btn.setToolTip("現在の出力先フォルダをファイルマネージャーで開きます")
+        open_folder_btn.clicked.connect(self._open_current_output_dir)
+        out_row.addWidget(open_folder_btn)
+
         layout.addLayout(out_row)
+
+        # --- Toolbar row (Quick actions) ---
+        toolbar_row = QHBoxLayout()
+        toolbar_row.setSpacing(8)
+
+        reload_btn = QPushButton("🔄 プレイリスト再読み込み")
+        reload_btn.setToolTip("Rekordbox から最新のプレイリストを再取得します")
+        reload_btn.clicked.connect(self._on_reload_playlists)
+        toolbar_row.addWidget(reload_btn)
+
+        select_all_btn = QPushButton("☑️ すべて選択")
+        select_all_btn.setToolTip("すべてのプレイリストをエクスポート対象として選択します")
+        select_all_btn.clicked.connect(lambda: self._set_all_checked(True))
+        toolbar_row.addWidget(select_all_btn)
+
+        deselect_all_btn = QPushButton("⬜ すべて解除")
+        deselect_all_btn.setToolTip("すべてのプレイリストの選択を解除します")
+        deselect_all_btn.clicked.connect(lambda: self._set_all_checked(False))
+        toolbar_row.addWidget(deselect_all_btn)
+
+        # Batch options menu
+        batch_btn = QPushButton("⚙️ 一括設定 ▾")
+        batch_btn.setToolTip("選択中のすべてのプレイリストのオプションを一括変更します")
+        batch_menu = QMenu(self)
+
+        act_roman_on = batch_menu.addAction("全プレイリストの「ローマ字変換」をON")
+        act_roman_on.triggered.connect(lambda: self._batch_set_option(COL_ROMAN, Qt.Checked))
+
+        act_roman_off = batch_menu.addAction("全プレイリストの「ローマ字変換」をOFF")
+        act_roman_off.triggered.connect(lambda: self._batch_set_option(COL_ROMAN, Qt.Unchecked))
+
+        batch_menu.addSeparator()
+
+        act_bpm_on = batch_menu.addAction("全プレイリストの「BPM付与」をON")
+        act_bpm_on.triggered.connect(lambda: self._batch_set_option(COL_BPM, Qt.Checked))
+
+        act_bpm_off = batch_menu.addAction("全プレイリストの「BPM付与」をOFF")
+        act_bpm_off.triggered.connect(lambda: self._batch_set_option(COL_BPM, Qt.Unchecked))
+
+        batch_menu.addSeparator()
+
+        act_sort_bpm = batch_menu.addAction("全プレイリストの並び順を「BPM昇順」に設定")
+        act_sort_bpm.triggered.connect(lambda: self._batch_set_sort("BPM昇順"))
+
+        act_sort_default = batch_menu.addAction("全プレイリストの並び順を「元の順序」に設定")
+        act_sort_default.triggered.connect(lambda: self._batch_set_sort("元の順序"))
+
+        batch_btn.setMenu(batch_menu)
+        toolbar_row.addWidget(batch_btn)
+
+        toolbar_row.addStretch(1)
+        layout.addLayout(toolbar_row)
 
         # --- Tree view ---
         self._model = QStandardItemModel()
-        self._model.setHorizontalHeaderLabels(["プレイリスト", "Roman", "BPM", "ソート順"])
+        self._model.setHorizontalHeaderLabels(["プレイリスト", "ローマ字変換", "BPM付加", "曲の並び順"])
 
         self._tree = QTreeView()
         self._tree.setModel(self._model)
@@ -183,6 +300,14 @@ class MainWindow(QMainWindow):
         self._tree.header().setSectionResizeMode(COL_BPM, QHeaderView.ResizeToContents)
         self._tree.header().setSectionResizeMode(COL_SORT, QHeaderView.ResizeToContents)
 
+        # Tooltips on headers
+        self._tree.header().setToolTip(
+            "プレイリスト: エクスポートする対象を選択\n"
+            "ローマ字変換: 日本語の曲名・アーティスト名・アルバム名を半角ローマ字に変換\n"
+            "BPM付加: 曲名先頭にテンポ数値を付与 (例: '128 曲名')\n"
+            "曲の並び順: プレイリスト内の曲順を指定"
+        )
+
         # Connect item-changed for checkbox cascading
         self._model.itemChanged.connect(self._on_item_changed)
 
@@ -190,10 +315,14 @@ class MainWindow(QMainWindow):
 
         # --- Export button row ---
         export_row = QHBoxLayout()
-        self._export_btn = QPushButton("エクスポート開始")
-        self._export_btn.setMinimumHeight(36)
+        self._export_btn = QPushButton("🚀 エクスポート開始")
+        self._export_btn.setMinimumHeight(40)
+        self._export_btn.setStyleSheet(
+            "QPushButton { font-size: 14px; font-weight: bold; padding: 6px 20px; }"
+        )
         self._export_btn.clicked.connect(self._on_export)
         export_row.addWidget(self._export_btn)
+
         self._progress = QProgressBar()
         self._progress.setRange(0, 0)  # indeterminate
         self._progress.setVisible(False)
@@ -203,20 +332,49 @@ class MainWindow(QMainWindow):
         # --- Log area ---
         self._log = QPlainTextEdit()
         self._log.setReadOnly(True)
-        self._log.setMaximumHeight(150)
-        self._log.setPlaceholderText("ログ出力...")
+        self._log.setMaximumHeight(130)
+        self._log.setPlaceholderText("実行ログがここに表示されます...")
         layout.addWidget(self._log)
 
+    # ----- Safety & Status checks -----
+
+    def _check_rekordbox_status(self) -> None:
+        """Check if Rekordbox process is currently running and update warning banner."""
+        is_running = False
+        try:
+            for proc in psutil.process_iter(["name"]):
+                name = proc.info.get("name")
+                if name and "rekordbox" in name.lower():
+                    is_running = True
+                    break
+        except Exception:
+            pass
+        self._rb_warn_frame.setVisible(is_running)
+
     # ----- Playlist loading -----
+
+    def _on_reload_playlists(self) -> None:
+        """Reload button handler."""
+        self._check_rekordbox_status()
+        self._load_playlists()
 
     def _load_playlists(self) -> None:
         """Load playlists from Rekordbox DB and build the tree model."""
         self._log_message("Rekordbox データベースを読み込み中...")
+        self._model.clear()
+        self._model.setHorizontalHeaderLabels(["プレイリスト", "ローマ字変換", "BPM付加", "曲の並び順"])
+
         try:
             db = RekordboxDatabase()
             pls = db.get_playlist().all()
         except Exception as e:
+            msg = (
+                f"Rekordbox データベースの読み込みに失敗しました。\n\n"
+                f"【詳細】: {e}\n\n"
+                f"※ Rekordbox が起動中の場合は終了してから再試行してください。"
+            )
             self._log_message(f"DB読み込みエラー: {e}")
+            QMessageBox.warning(self, "データベース読み込みエラー", msg)
             return
 
         id_map = {pl.ID: pl for pl in pls}
@@ -268,7 +426,6 @@ class MainWindow(QMainWindow):
                     sort_item.setEditable(False)
                 else:
                     # Playlist: option columns with checkboxes / combo
-                    # Restore per-playlist options
                     pl_opts = saved.get("playlist_options", {}).get(path_str, {})
 
                     roman_item = QStandardItem()
@@ -277,6 +434,7 @@ class MainWindow(QMainWindow):
                         Qt.Checked if pl_opts.get("roman", True) else Qt.Unchecked
                     )
                     roman_item.setEditable(False)
+                    roman_item.setToolTip("日本語の曲名・アーティスト名・アルバム名を半角ローマ字に変換します")
 
                     bpm_item = QStandardItem()
                     bpm_item.setCheckable(True)
@@ -284,11 +442,13 @@ class MainWindow(QMainWindow):
                         Qt.Checked if pl_opts.get("bpm", True) else Qt.Unchecked
                     )
                     bpm_item.setEditable(False)
+                    bpm_item.setToolTip("曲名の先頭にテンポ（BPM数値）を付加します (例: 128 TrackName)")
 
                     sort_val = pl_opts.get("orderby", "bpm")
                     sort_label = SORT_MAP_REV.get(sort_val, "BPM昇順")
                     sort_item = QStandardItem(sort_label)
                     sort_item.setEditable(False)
+                    sort_item.setToolTip("プレイリスト内の曲順を指定します")
 
                 parent_item.appendRow([name_item, roman_item, bpm_item, sort_item])
 
@@ -301,13 +461,17 @@ class MainWindow(QMainWindow):
 
         self._model.blockSignals(False)
 
-        self._tree.expandAll()
+        self._tree.collapseAll()
 
         # Set sort combo delegates after tree is built
         self._setup_sort_combos(root)
 
-        # Restore output path
-        self._output_edit.setText(saved.get("output_path", ""))
+        # Restore output path (or use user-friendly default)
+        saved_output = saved.get("output_path", "").strip()
+        if saved_output:
+            self._output_edit.setText(saved_output)
+        else:
+            self._output_edit.setText(str(get_default_output_dir()))
 
         count = self._count_playlists(root)
         self._log_message(f"{count} 個のプレイリストを読み込みました")
@@ -324,13 +488,11 @@ class MainWindow(QMainWindow):
                 idx = self._model.indexFromItem(sort_item)
                 combo = QComboBox()
                 combo.addItems(SORT_OPTIONS)
-                # Set current value from model text
                 current_text = sort_item.text()
                 combo_idx = combo.findText(current_text)
                 if combo_idx >= 0:
                     combo.setCurrentIndex(combo_idx)
                 self._tree.setIndexWidget(idx, combo)
-            # Recurse for children
             if name_item.hasChildren():
                 self._setup_sort_combos(name_item)
 
@@ -346,6 +508,57 @@ class MainWindow(QMainWindow):
                     count += self._count_playlists(item)
         return count
 
+    # ----- Batch operations -----
+
+    def _set_all_checked(self, checked: bool) -> None:
+        """Check or uncheck all playlists and folders."""
+        state = Qt.Checked if checked else Qt.Unchecked
+        self._model.blockSignals(True)
+        root = self._model.invisibleRootItem()
+        self._set_children_check(root, state)
+        self._model.blockSignals(False)
+
+    def _batch_set_option(self, col: int, state: Qt.CheckState) -> None:
+        """Batch set checkbox state for an option column across all playlists."""
+        root = self._model.invisibleRootItem()
+        self._apply_option_state(root, col, state)
+
+    def _apply_option_state(self, parent: QStandardItem, col: int, state: Qt.CheckState) -> None:
+        for row in range(parent.rowCount()):
+            name_item = parent.child(row, COL_CHECK)
+            if not name_item:
+                continue
+            is_folder = name_item.data(ROLE_IS_FOLDER)
+            if not is_folder:
+                opt_item = parent.child(row, col)
+                if opt_item and opt_item.isCheckable():
+                    opt_item.setCheckState(state)
+            if name_item.hasChildren():
+                self._apply_option_state(name_item, col, state)
+
+    def _batch_set_sort(self, sort_text: str) -> None:
+        """Batch set sort order combo value for all playlists."""
+        root = self._model.invisibleRootItem()
+        self._apply_sort_text(root, sort_text)
+
+    def _apply_sort_text(self, parent: QStandardItem, sort_text: str) -> None:
+        for row in range(parent.rowCount()):
+            name_item = parent.child(row, COL_CHECK)
+            if not name_item:
+                continue
+            is_folder = name_item.data(ROLE_IS_FOLDER)
+            if not is_folder:
+                sort_item = parent.child(row, COL_SORT)
+                if sort_item:
+                    idx = self._model.indexFromItem(sort_item)
+                    widget = self._tree.indexWidget(idx)
+                    if isinstance(widget, QComboBox):
+                        c_idx = widget.findText(sort_text)
+                        if c_idx >= 0:
+                            widget.setCurrentIndex(c_idx)
+            if name_item.hasChildren():
+                self._apply_sort_text(name_item, sort_text)
+
     # ----- Checkbox cascading -----
 
     def _on_item_changed(self, item: QStandardItem) -> None:
@@ -355,7 +568,6 @@ class MainWindow(QMainWindow):
         is_folder = item.data(ROLE_IS_FOLDER)
         if not is_folder:
             return
-        # Block signals to prevent recursive triggers
         self._model.blockSignals(True)
         self._set_children_check(item, item.checkState())
         self._model.blockSignals(False)
@@ -375,12 +587,29 @@ class MainWindow(QMainWindow):
         if folder:
             self._output_edit.setText(folder)
 
+    def _open_current_output_dir(self) -> None:
+        """Open the current output directory in the system file explorer."""
+        path_str = self._output_edit.text().strip()
+        if not path_str:
+            QMessageBox.information(self, "通知", "出力先フォルダが設定されていません。")
+            return
+        p = Path(path_str)
+        if not p.exists():
+            try:
+                p.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                QMessageBox.warning(self, "エラー", f"フォルダを作成できませんでした: {e}")
+                return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(p.resolve())))
+
     # ----- Export -----
 
     def _on_export(self) -> None:
+        self._check_rekordbox_status()
+
         output_path = self._output_edit.text().strip()
         if not output_path:
-            QMessageBox.warning(self, "エラー", "出力先フォルダを指定してください。")
+            QMessageBox.warning(self, "確認", "出力先フォルダを指定してください。")
             return
 
         output_dir = Path(output_path)
@@ -388,7 +617,9 @@ class MainWindow(QMainWindow):
             try:
                 output_dir.mkdir(parents=True, exist_ok=True)
             except Exception as e:
-                QMessageBox.critical(self, "エラー", f"フォルダ作成に失敗: {e}")
+                QMessageBox.critical(
+                    self, "フォルダ作成エラー", f"フォルダの作成に失敗しました:\n{e}"
+                )
                 return
 
         xml_path = str(output_dir / "rekordbox.xml")
@@ -399,7 +630,12 @@ class MainWindow(QMainWindow):
         self._collect_selected(root, selected_paths)
 
         if not selected_paths:
-            QMessageBox.warning(self, "エラー", "エクスポートするプレイリストを選択してください。")
+            QMessageBox.warning(
+                self,
+                "プレイリスト未選択",
+                "エクスポート対象のプレイリストが選択されていません。\n"
+                "一覧からエクスポートしたいプレイリストにチェックを入れてください。",
+            )
             return
 
         # Collect per-playlist options dict
@@ -411,7 +647,8 @@ class MainWindow(QMainWindow):
 
         self._export_btn.setEnabled(False)
         self._progress.setVisible(True)
-        self._log_message(f"エクスポート対象: {len(selected_paths)} プレイリスト")
+        self._current_export_dir = output_dir
+        self._log_message(f"エクスポート対象: {len(selected_paths)} 件の項目")
 
         # Create worker with per-playlist options
         worker = ExportWorker(
@@ -436,71 +673,58 @@ class MainWindow(QMainWindow):
         thread.start()
 
     def _collect_selected(self, parent: QStandardItem, result: List[str]) -> None:
-        """Collect path strings of checked items (folders and playlists).
-
-        When a folder is checked, its path is included and children are
-        skipped because the core export logic automatically includes all
-        descendants of a selected folder — matching CLI behaviour.
-        """
+        """Collect path strings of checked items (folders and playlists)."""
         for row in range(parent.rowCount()):
             item = parent.child(row, COL_CHECK)
             if not item:
                 continue
             if item.checkState() != Qt.Checked:
-                # Still recurse into unchecked folders; a child may be checked
                 if item.hasChildren():
                     self._collect_selected(item, result)
                 continue
             path_str = item.data(ROLE_PATH)
             is_folder = item.data(ROLE_IS_FOLDER)
             if is_folder:
-                # Pass folder path — core logic includes all descendants
                 if path_str:
                     result.append(path_str)
-                # No need to recurse; descendants are covered by the folder
             else:
                 if path_str:
                     result.append(path_str)
 
-    def _collect_options(self, parent: QStandardItem) -> List[dict]:
-        """Collect per-playlist options for checked playlists."""
-        results: List[dict] = []
-        for row in range(parent.rowCount()):
-            item = parent.child(row, COL_CHECK)
-            if not item:
-                continue
-            is_folder = item.data(ROLE_IS_FOLDER)
-            if item.checkState() == Qt.Checked and not is_folder:
-                roman_item = parent.child(row, COL_ROMAN)
-                bpm_item = parent.child(row, COL_BPM)
-                sort_item = parent.child(row, COL_SORT)
-
-                roman = roman_item.checkState() == Qt.Checked if roman_item else True
-                bpm = bpm_item.checkState() == Qt.Checked if bpm_item else True
-
-                # Read combo widget value
-                orderby = "bpm"
-                if sort_item:
-                    idx = self._model.indexFromItem(sort_item)
-                    widget = self._tree.indexWidget(idx)
-                    if isinstance(widget, QComboBox):
-                        orderby = SORT_MAP.get(widget.currentText(), "bpm")
-
-                results.append({"roman": roman, "bpm": bpm, "orderby": orderby})
-            if item.hasChildren():
-                results.extend(self._collect_options(item))
-        return results
-
     @Slot(str)
     def _on_export_error(self, msg: str) -> None:
         self._log_message(f"エラー: {msg}")
-        QMessageBox.critical(self, "エクスポートエラー", msg)
+        err_dialog = QMessageBox(self)
+        err_dialog.setIcon(QMessageBox.Critical)
+        err_dialog.setWindowTitle("エクスポートエラー")
+        err_dialog.setText("エクスポート処理中にエラーが発生しました。")
+        err_dialog.setInformativeText(
+            f"{msg}\n\n"
+            "【ヒント】\n"
+            "・Rekordbox が起動している場合は終了してから再試行してください。\n"
+            "・出力先フォルダの書き込み権限やディスク容量を確認してください。"
+        )
+        err_dialog.exec()
 
     @Slot()
     def _on_export_done(self) -> None:
         self._export_btn.setEnabled(True)
         self._progress.setVisible(False)
         self._export_thread = None
+
+        export_dir = getattr(self, "_current_export_dir", None)
+        if export_dir and export_dir.exists():
+            box = QMessageBox(self)
+            box.setIcon(QMessageBox.Information)
+            box.setWindowTitle("エクスポート完了")
+            box.setText("🎉 エクスポートが正常に完了しました！")
+            box.setInformativeText(f"【出力先】\n{export_dir}")
+            open_btn = box.addButton("📂 出力先フォルダを開く", QMessageBox.ActionRole)
+            box.addButton(QMessageBox.Ok)
+            box.exec()
+
+            if box.clickedButton() == open_btn:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(str(export_dir.resolve())))
 
     # ----- Logging -----
 
@@ -598,6 +822,7 @@ class MainWindow(QMainWindow):
 # ---------------------------------------------------------------------------
 def main() -> None:
     app = QApplication(sys.argv)
+    app.setWindowIcon(get_app_icon())
     window = MainWindow()
     window.show()
     sys.exit(app.exec())
@@ -605,3 +830,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+

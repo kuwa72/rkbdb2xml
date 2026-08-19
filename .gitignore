@@ -46,3 +46,7 @@ ENV/
 
 temp/
 out/
+test_output.txt
+debug_out.xml
+out.xml
+testout.xml

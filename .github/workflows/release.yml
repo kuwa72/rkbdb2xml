@@ -1,0 +1,105 @@
+name: Build and Release GUI Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: windows-latest
+            artifact_name: rkbdb2xml-gui.exe
+            asset_name: rkbdb2xml-gui-windows-amd64.exe
+          - os: macos-latest
+            artifact_name: rkbdb2xml-gui-mac.zip
+            asset_name: rkbdb2xml-gui-macos-amd64.zip
+          - os: ubuntu-latest
+            artifact_name: rkbdb2xml-gui
+            asset_name: rkbdb2xml-gui-linux-amd64
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Build with PyInstaller (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          pyinstaller --clean rkbdb2xml-gui.spec
+
+      - name: Build with PyInstaller (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          pyinstaller --clean rkbdb2xml-gui.spec
+          cd dist
+          zip -r ../rkbdb2xml-gui-mac.zip rkbdb2xml-gui.app rkbdb2xml-gui 2>/dev/null || zip -r ../rkbdb2xml-gui-mac.zip rkbdb2xml-gui
+
+      - name: Build with PyInstaller (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          pyinstaller --clean rkbdb2xml-gui.spec
+
+      - name: Rename binary (Windows & Linux)
+        if: matrix.os != 'macos-latest'
+        shell: bash
+        run: |
+          mv dist/${{ matrix.artifact_name }} dist/${{ matrix.asset_name }}
+
+      - name: Rename zip (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          mv rkbdb2xml-gui-mac.zip ${{ matrix.asset_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: |
+            dist/${{ matrix.asset_name }}
+            ${{ matrix.asset_name }}
+          if-no-files-found: error
+
+  release:
+    name: Create GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten artifacts directory
+        run: |
+          mkdir -p release-assets
+          find artifacts -type f -exec cp {} release-assets/ \;
+          ls -la release-assets/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
