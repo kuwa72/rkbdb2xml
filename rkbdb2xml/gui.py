@@ -19,6 +19,7 @@ from PySide6.QtCore import (
     QModelIndex,
     QObject,
     QThread,
+    QTimer,
     QUrl,
     Qt,
     Signal,
@@ -162,12 +163,144 @@ class ExportWorker(QObject):
             self.finished.emit()
 
 
+
+# ---------------------------------------------------------------------------
+# Format helper
+# ---------------------------------------------------------------------------
+def format_bytes(bytes_val: int) -> str:
+    """Format bytes into a human-readable string (B, KB, MB, GB)."""
+    if bytes_val < 1024:
+        return f"{bytes_val} B"
+    elif bytes_val < 1024 * 1024:
+        return f"{bytes_val / 1024:.1f} KB"
+    elif bytes_val < 1024 * 1024 * 1024:
+        return f"{bytes_val / (1024 * 1024):.1f} MB"
+    else:
+        return f"{bytes_val / (1024 * 1024 * 1024):.2f} GB"
+
+
+# ---------------------------------------------------------------------------
+# Size calculator worker (Async)
+# ---------------------------------------------------------------------------
+class SizeCalculatorWorker(QObject):
+    """Calculates total track count and size for selected playlists asynchronously."""
+    finished = Signal(int, int, int, int)  # (playlist_count, unique_track_count, total_bytes, missing_count)
+
+    def __init__(self, selected_paths: List[str], db_path: Optional[str] = None) -> None:
+        super().__init__()
+        self._selected_paths = selected_paths
+        self._db_path = db_path
+        self._is_cancelled = False
+
+    def cancel(self) -> None:
+        self._is_cancelled = True
+
+    @Slot()
+    def run(self) -> None:
+        if not self._selected_paths or self._is_cancelled:
+            self.finished.emit(0, 0, 0, 0)
+            return
+
+        try:
+            db = RekordboxDatabase(self._db_path)
+            all_pls = db.get_playlist().all()
+
+            # Map hierarchical paths to playlist objects
+            id_map = {pl.ID: pl for pl in all_pls}
+            parent_map: Dict[Any, list] = {}
+            for pl in all_pls:
+                parent_map.setdefault(pl.ParentID, []).append(pl)
+            root_parents = [pid for pid in parent_map if pid not in id_map]
+
+            path_map: Dict[str, Any] = {}
+
+            def traverse(pid: Any, current_path: str) -> None:
+                for pl in parent_map.get(pid, []):
+                    p_str = f"{current_path}/{pl.Name}" if current_path else pl.Name
+                    path_map[p_str] = pl
+                    traverse(pl.ID, p_str)
+
+            for rp in root_parents:
+                traverse(rp, "")
+
+            # Identify target playlists (resolve folders to children playlists)
+            target_pls = []
+            for spath in self._selected_paths:
+                if spath in path_map:
+                    pl = path_map[spath]
+                    if not pl.is_folder and pl not in target_pls:
+                        target_pls.append(pl)
+
+            if not target_pls or self._is_cancelled:
+                self.finished.emit(0, 0, 0, 0)
+                return
+
+            # Collect unique track IDs
+            unique_track_ids = set()
+            for pl in target_pls:
+                if self._is_cancelled:
+                    return
+                entries = db.get_playlist_contents(pl).all()
+                for entry in entries:
+                    cid = getattr(entry, "ContentID", None) or getattr(entry, "ID", None)
+                    if cid is not None:
+                        unique_track_ids.add(cid)
+
+            # Query track sizes
+            from .rkbdb2xml import RekordboxXMLExporter
+            resolver = RekordboxXMLExporter.__new__(RekordboxXMLExporter)
+            all_contents = db.get_content().all()
+            content_map = {c.ID: c for c in all_contents}
+
+            total_bytes = 0
+            missing_count = 0
+
+            for cid in unique_track_ids:
+                if self._is_cancelled:
+                    return
+                content = content_map.get(cid)
+                if not content:
+                    continue
+
+                # 1. Try DB FileSize attribute
+                fsize = getattr(content, "FileSize", None)
+                if fsize and str(fsize).isdigit() and int(fsize) > 0:
+                    total_bytes += int(fsize)
+                    continue
+
+                # 2. Try disk file
+                loc = getattr(content, "FolderPath", None)
+                found = False
+                if loc:
+                    p = resolver._resolve_file_path(loc)
+                    if p and p.exists():
+                        try:
+                            total_bytes += p.stat().st_size
+                            found = True
+                        except Exception:
+                            pass
+
+                if not found:
+                    missing_count += 1
+                    total_bytes += 10 * 1024 * 1024  # Estimate ~10MB per track
+
+            if not self._is_cancelled:
+                self.finished.emit(
+                    len(target_pls), len(unique_track_ids), total_bytes, missing_count
+                )
+
+        except Exception:
+            if not self._is_cancelled:
+                self.finished.emit(0, 0, 0, 0)
+
+
 # ---------------------------------------------------------------------------
 # Sort-order delegate helper
 # ---------------------------------------------------------------------------
 SORT_OPTIONS = ["元の順序", "BPM昇順"]
 SORT_MAP = {"元の順序": "default", "BPM昇順": "bpm"}
 SORT_MAP_REV = {v: k for k, v in SORT_MAP.items()}
+
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +318,14 @@ class MainWindow(QMainWindow):
         self._is_updating_checks = False
         self._current_preview_item: Optional[QStandardItem] = None
 
+        self._calc_thread: Optional[QThread] = None
+        self._calc_worker: Optional[SizeCalculatorWorker] = None
+        self._calc_timer = QTimer(self)
+        self._calc_timer.setSingleShot(True)
+        self._calc_timer.timeout.connect(self._start_async_size_calculation)
+
         self._build_ui()
+
         self._check_rekordbox_status()
         self._load_playlists()
 
@@ -363,6 +503,26 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self._splitter, 1)
 
+        # --- Export summary & capacity meter ---
+        summary_frame = QFrame()
+        summary_frame.setStyleSheet(
+            "QFrame { background-color: #f8f9fa; border: 1px solid #dee2e6; "
+            "border-radius: 6px; padding: 6px 12px; }"
+        )
+        summary_layout = QHBoxLayout(summary_frame)
+        summary_layout.setContentsMargins(6, 4, 6, 4)
+        summary_layout.setSpacing(12)
+
+        self._summary_label = QLabel("📊 エクスポート対象: 0 プレイリスト (0 曲 / 0 MB)")
+        self._summary_label.setStyleSheet("font-size: 13px; font-weight: bold; color: #212529;")
+        summary_layout.addWidget(self._summary_label)
+
+        self._capacity_label = QLabel("・ 16GB USBメモリ目安: 0.0% 使用 (残り 14.8 GB)")
+        self._capacity_label.setStyleSheet("font-size: 12px; color: #2e7d32; font-weight: bold;")
+        summary_layout.addWidget(self._capacity_label)
+
+        summary_layout.addStretch(1)
+        layout.addWidget(summary_frame)
 
         # --- Export button row ---
         export_row = QHBoxLayout()
@@ -373,6 +533,7 @@ class MainWindow(QMainWindow):
         )
         self._export_btn.clicked.connect(self._on_export)
         export_row.addWidget(self._export_btn)
+
 
         self._progress = QProgressBar()
         self._progress.setRange(0, 0)  # indeterminate
@@ -539,6 +700,10 @@ class MainWindow(QMainWindow):
                     idx, self._tree.selectionModel().SelectionFlag.ClearAndSelect
                 )
                 break
+
+        # Calculate initial selection size
+        self._trigger_size_calculation()
+
 
     def _setup_sort_combos(self, parent: QStandardItem) -> None:
         """Set QComboBox widgets on sort-order column for playlist rows."""
@@ -735,6 +900,7 @@ class MainWindow(QMainWindow):
             self._set_children_check(root, state)
         finally:
             self._is_updating_checks = False
+        self._trigger_size_calculation()
 
 
     def _batch_set_option(self, col: int, state: Qt.CheckState) -> None:
@@ -781,6 +947,71 @@ class MainWindow(QMainWindow):
             if name_item.hasChildren():
                 self._apply_sort_text(name_item, sort_text)
 
+    # ----- Size & track count calculation (Async) -----
+
+    def _trigger_size_calculation(self) -> None:
+        """Trigger debounced asynchronous calculation of selected tracks and size."""
+        self._summary_label.setText("📊 エクスポート対象: 計算中...")
+        self._calc_timer.start(250)  # 250ms debounce
+
+    def _start_async_size_calculation(self) -> None:
+        """Start background worker to compute size of selected playlists."""
+        if self._calc_worker:
+            self._calc_worker.cancel()
+        if self._calc_thread and self._calc_thread.isRunning():
+            self._calc_thread.quit()
+            self._calc_thread.wait(100)
+
+        selected_paths: List[str] = []
+        root = self._model.invisibleRootItem()
+        self._collect_selected(root, selected_paths)
+
+        if not selected_paths:
+            self._on_size_calculated(0, 0, 0, 0)
+            return
+
+        worker = SizeCalculatorWorker(selected_paths)
+        thread = QThread()
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_size_calculated)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        self._calc_worker = worker
+        self._calc_thread = thread
+        thread.start()
+
+    @Slot(int, int, int, int)
+    def _on_size_calculated(
+        self, playlist_count: int, track_count: int, total_bytes: int, missing_count: int
+    ) -> None:
+        """Handle computed size and update summary label and capacity meter."""
+        size_str = format_bytes(total_bytes)
+        self._summary_label.setText(
+            f"📊 エクスポート対象: {playlist_count} プレイリスト (全 {track_count} 曲 / 約 {size_str})"
+        )
+
+        # 16GB usable capacity is approx 14.8 GB
+        USB_16GB_BYTES = 14.8 * 1024 * 1024 * 1024
+        ratio = (total_bytes / USB_16GB_BYTES) * 100.0
+        remaining_bytes = USB_16GB_BYTES - total_bytes
+
+        if remaining_bytes >= 0:
+            rem_str = format_bytes(int(remaining_bytes))
+            self._capacity_label.setText(
+                f"・ 16GB USBメモリ目安: {ratio:.1f}% 使用 (残り {rem_str})"
+            )
+            self._capacity_label.setStyleSheet("font-size: 12px; color: #2e7d32; font-weight: bold;")
+        else:
+            over_str = format_bytes(int(-remaining_bytes))
+            self._capacity_label.setText(
+                f"⚠️ 16GB容量超過: {ratio:.1f}% (+{over_str} 超過)"
+            )
+            self._capacity_label.setStyleSheet("font-size: 12px; color: #c62828; font-weight: bold;")
+
     # ----- Checkbox cascading -----
 
     def _on_item_changed(self, item: QStandardItem) -> None:
@@ -811,6 +1042,9 @@ class MainWindow(QMainWindow):
                 self._update_parent_check_state(parent)
         finally:
             self._is_updating_checks = False
+
+        self._trigger_size_calculation()
+
 
 
     def _set_children_check(self, parent: QStandardItem, state: Qt.CheckState) -> None:
