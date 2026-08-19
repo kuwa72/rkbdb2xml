@@ -401,6 +401,57 @@ class RekordboxXMLExporter:
                     self._add_playlists_to_playlist(pl_xml, child)
                 all_playlists.remove(child)
 
+    def _resolve_file_path(self, loc: Optional[str]) -> Optional[Path]:
+        """Resolve a Rekordbox FolderPath URI or local path string to a valid Path object."""
+        if not loc:
+            return None
+
+        # 1. Try directly if valid and exists
+        try:
+            p = Path(loc)
+            if p.exists():
+                return p
+        except Exception:
+            pass
+
+        # 2. Parse file:// URI or encoded path
+        path_str = loc
+        if "://" in loc or loc.startswith("file:"):
+            parsed = urllib.parse.urlparse(loc)
+            unquoted = urllib.parse.unquote(parsed.path)
+            # Use standard url2pathname for OS-specific conversions
+            converted = urllib.request.url2pathname(unquoted)
+            if os.name == "nt":
+                converted = converted.lstrip("/").lstrip("\\")
+                if len(unquoted) >= 3 and unquoted[1] == ":" and unquoted[0] == "/":
+                    converted = unquoted[1:]
+            path_str = converted
+        else:
+            path_str = urllib.parse.unquote(loc)
+
+        # 3. Try converted path
+        try:
+            p = Path(path_str)
+            if p.exists():
+                return p
+        except Exception:
+            pass
+
+        # 4. Fallback for Windows leading slash
+        if os.name == "nt" and (path_str.startswith("/") or path_str.startswith("\\")):
+            try:
+                p = Path(path_str.lstrip("/\\"))
+                if p.exists():
+                    return p
+            except Exception:
+                pass
+
+        # Return Path even if not exists (for logging/matching)
+        try:
+            return Path(path_str)
+        except Exception:
+            return None
+
     def _add_playlists_to_playlist(self, playlist_node, playlist) -> None:
         """
         Add tracks to a playlist.
@@ -422,7 +473,7 @@ class RekordboxXMLExporter:
         # orderby=bpm オプション対応
         if orderby == 'bpm':
             def safe_bpm(entry):
-                bpm = entry.BPM
+                bpm = getattr(entry, 'BPM', None)
                 if not bpm:
                     return 0
                 return bpm
@@ -430,90 +481,139 @@ class RekordboxXMLExporter:
 
         # Normalize playlist entries and record per-track options
         for entry in playlist_entries:
-            playlist_node.add_track(entry.ID)
-            self._selected_track_ids.add(entry.ID)
+            # entry can be DjmdContent or DjmdSongPlaylist
+            track_id = getattr(entry, 'ContentID', None) or getattr(entry, 'ID', None)
+            if track_id is None:
+                continue
+
+            playlist_node.add_track(track_id)
+
+            # Record track ID in all possible types for robust lookup
+            self._selected_track_ids.add(track_id)
+            self._selected_track_ids.add(str(track_id))
+            try:
+                self._selected_track_ids.add(int(track_id))
+            except Exception:
+                pass
+
+            if getattr(entry, 'ID', None) is not None:
+                self._selected_track_ids.add(entry.ID)
+                self._selected_track_ids.add(str(entry.ID))
+
             # Store per-track options (first playlist's settings win)
-            if entry.ID not in self._track_options:
-                self._track_options[entry.ID] = {
+            if track_id not in self._track_options:
+                self._track_options[track_id] = {
                     "roman": use_roman,
                     "bpm": use_bpm,
                 }
 
     def close(self) -> None:
         """Close the database connection when done."""
-        # In version 0.4.0+ closing might not be necessary,
-        # but we'll call it if the method exists
-        self.db.close()
+        try:
+            self.db.close()
+        except Exception:
+            pass
 
     def _copy_files(self, export_dir: Path) -> None:
         """
-        Copy selected track files to export directory, preserving home-relative paths.
+        Copy selected track files to export directory, preserving audio metadata.
         """
-        # Flatten copy: use md5 of full path as filename and rewrite tags
+        copied = 0
+        skipped = 0
+        failed = 0
+
         for content in self.db.get_content().all():
-            if content.ID not in self._selected_track_ids:
-                continue
+            cid = getattr(content, 'ID', None)
+            # If specific playlists selected, filter by selected tracks
+            if getattr(self, '_playlist_specs', None):
+                if (
+                    cid not in self._selected_track_ids
+                    and str(cid) not in self._selected_track_ids
+                ):
+                    continue
+
             loc = getattr(content, 'FolderPath', None)
             if not loc:
-                self.verbose("FolderPath missing, skipping")
+                self.verbose(f"Track ID {cid}: FolderPath missing, skipping")
+                skipped += 1
                 continue
-            # Parse file:// URI or raw path
-            if "://" in loc:
-                parsed = urllib.parse.urlparse(loc)
-                path_str = urllib.parse.unquote(parsed.path)
-                if os.name == 'nt' and path_str.startswith('/'):
-                    path_str = path_str.lstrip('/')
-            else:
-                path_str = loc
-            orig = Path(path_str)
-            if not orig.exists():
-                self.verbose(f"Source file not found, skipping: {orig}")
+
+            orig = self._resolve_file_path(loc)
+            if not orig or not orig.exists():
+                print(f"[WARN] 楽曲ファイルが見つかりません: {loc} (解決パス: {orig})")
+                failed += 1
                 continue
-            # MD5 hash as filename (no extension)
-            md5_hex = hashlib.md5(path_str.encode("utf-8")).hexdigest()
-            # 元ファイルの拡張子を保持
-            ext = orig.suffix
+
+            # MD5 hash as filename (preserving extension)
+            path_for_hash = str(orig).encode("utf-8")
+            md5_hex = hashlib.md5(path_for_hash).hexdigest()
+            ext = orig.suffix or ".mp3"
             dest = export_dir / f"{md5_hex}{ext}"
-            
-            # コピー先があったらコピーしない。ただしタグは書き換えたいのでコピー処理だけ飛ばす。
+
+            # Copy file if not already copied
             if not dest.exists():
                 try:
                     shutil.copy2(orig, dest)
+                    copied += 1
                 except Exception as e:
-                    self.verbose(f"Copy failed: {orig} → {dest}: {e}")
+                    print(f"[ERROR] コピー失敗: {orig} → {dest}: {e}")
+                    failed += 1
                     continue
-            # Record mapping from original path to copied file
-            self._copy_map[path_str] = dest
+            else:
+                copied += 1
+
+            # Map multiple path variants for XML location updates
+            self._copy_map[loc] = dest
+            self._copy_map[str(orig)] = dest
+            self._copy_map[orig.as_posix()] = dest
+            if "://" in loc:
+                self._copy_map[urllib.parse.unquote(loc)] = dest
+                parsed = urllib.parse.urlparse(loc)
+                self._copy_map[urllib.parse.unquote(parsed.path)] = dest
+
+            # Resolve per-track options
+            track_opts = self._track_options.get(cid, {})
+            use_roman = track_opts.get("roman", self._use_roman)
+            use_bpm = track_opts.get("bpm", self._use_bpm)
+
             # Rewrite metadata tags using mutagen
             title_val = getattr(content, 'Title', '') or ''
             artist_val = getattr(content, 'ArtistName', '') or getattr(content, 'Artist', '') or ''
             album_val = getattr(content, 'AlbumName', '') or getattr(content, 'Album', '') or ''
-            if self._use_roman:
-                title_val = self._romanize(title_val)
-                artist_val = self._romanize(artist_val)
-                album_val = self._romanize(album_val)
-            if self._use_bpm:
+
+            if use_roman:
+                title_val = self._romanize(title_val, force=True)
+                artist_val = self._romanize(artist_val, force=True)
+                album_val = self._romanize(album_val, force=True)
+
+            if use_bpm:
                 bpm_val = self._safe_bpm(getattr(content, 'BPM', None))
                 if bpm_val:
                     title_val = f"{int(bpm_val)} {title_val}"
-            ext = dest.suffix.lower()
-            if ext == '.mp3':
-                try:
-                    audio = ID3(dest)
-                except mutagen.id3.ID3NoHeaderError:
-                    audio = ID3()
-                audio['TIT2'] = TIT2(encoding=3, text=title_val)
-                audio['TPE1'] = TPE1(encoding=3, text=artist_val)
-                audio['TALB'] = TALB(encoding=3, text=album_val)
-                audio.save(dest)
-            elif ext in ('.m4a', '.mp4'):
-                audio = MP4(dest)
-                if audio.tags is None:
-                    audio.add_tags()
-                audio.tags['\xa9nam'] = [title_val]
-                audio.tags['\xa9ART'] = [artist_val]
-                audio.tags['\xa9alb'] = [album_val]
-                audio.save()
+
+            ext_lower = dest.suffix.lower()
+            try:
+                if ext_lower == '.mp3':
+                    try:
+                        audio = ID3(dest)
+                    except mutagen.id3.ID3NoHeaderError:
+                        audio = ID3()
+                    audio['TIT2'] = TIT2(encoding=3, text=title_val)
+                    audio['TPE1'] = TPE1(encoding=3, text=artist_val)
+                    audio['TALB'] = TALB(encoding=3, text=album_val)
+                    audio.save(dest)
+                elif ext_lower in ('.m4a', '.mp4'):
+                    audio = MP4(dest)
+                    if audio.tags is None:
+                        audio.add_tags()
+                    audio.tags['\xa9nam'] = [title_val]
+                    audio.tags['\xa9ART'] = [artist_val]
+                    audio.tags['\xa9alb'] = [album_val]
+                    audio.save()
+            except Exception as e:
+                self.verbose(f"[WARN] タグ書き換えエラー ({dest.name}): {e}")
+
+        print(f"楽曲ファイル処理完了: コピー={copied}件, 失敗={failed}件, スキップ={skipped}件")
 
     def _update_locations(self, xml_path: str, export_dir: Path) -> None:
         """
@@ -522,33 +622,38 @@ class RekordboxXMLExporter:
         from lxml import etree
         import urllib.parse as up
         import os
-        # Parse XML file
+
         tree = etree.parse(xml_path)
-        # Update each TRACK Location
         for track in tree.findall(".//TRACK"):
             loc = track.attrib.get("Location")
             if not loc:
                 continue
-            # Extract raw filesystem path
-            if "://" in loc:
+
+            # Look up in copy_map using various key representations
+            dest = self._copy_map.get(loc)
+            if not dest and "://" in loc:
                 parsed = up.urlparse(loc)
                 raw = up.unquote(parsed.path)
-                if os.name == "nt" and raw.startswith("/"):
-                    raw = raw.lstrip("/")
-            else:
-                raw = loc
-            dest = self._copy_map.get(raw)
+                dest = self._copy_map.get(raw)
+                if not dest and os.name == "nt" and raw.startswith("/"):
+                    dest = self._copy_map.get(raw.lstrip("/"))
+
+            if not dest:
+                # Try resolved path
+                resolved = self._resolve_file_path(loc)
+                if resolved:
+                    dest = self._copy_map.get(str(resolved)) or self._copy_map.get(resolved.as_posix())
+
             if dest:
-                # Build file URI with explicit localhost
                 uri = dest.resolve().as_uri()
                 parsed_uri = up.urlparse(uri)
                 if parsed_uri.scheme == "file" and not parsed_uri.netloc:
                     parsed_uri = parsed_uri._replace(netloc="localhost")
                     uri = up.urlunparse(parsed_uri)
                 track.attrib["Location"] = uri
-            # TEMPO added via Track.add_tempo; manual injection removed
-        # Write back updated XML
+
         tree.write(xml_path, encoding="UTF-8", xml_declaration=True)
+
 
 
 def export_rekordbox_db_to_xml(

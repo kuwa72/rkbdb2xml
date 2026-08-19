@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 set -e
 
-VERSION="v0.2.0"
+VERSION="v0.2.1"
 
 echo "=== Staging changes ==="
-git add .gitignore README.md pyproject.toml rkbdb2xml/ tests/test_romanization.py .github/ assets/ rkbdb2xml-gui*.spec run_gui.py scripts/
+git add .gitignore README.md pyproject.toml rkbdb2xml/ tests/ .github/ assets/ rkbdb2xml-gui*.spec run_gui.py scripts/
+
 
 echo "=== Committing changes ==="
 git commit -m "feat: Release ${VERSION} - Polish GUI UX, add app icons, and automated multi-platform build" || true

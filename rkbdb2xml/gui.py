@@ -180,6 +180,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(get_app_icon())
 
         self._export_thread: Optional[QThread] = None
+        self._is_updating_checks = False
 
         self._build_ui()
         self._check_rekordbox_status()
@@ -513,10 +514,13 @@ class MainWindow(QMainWindow):
     def _set_all_checked(self, checked: bool) -> None:
         """Check or uncheck all playlists and folders."""
         state = Qt.Checked if checked else Qt.Unchecked
-        self._model.blockSignals(True)
-        root = self._model.invisibleRootItem()
-        self._set_children_check(root, state)
-        self._model.blockSignals(False)
+        self._is_updating_checks = True
+        try:
+            root = self._model.invisibleRootItem()
+            self._set_children_check(root, state)
+        finally:
+            self._is_updating_checks = False
+
 
     def _batch_set_option(self, col: int, state: Qt.CheckState) -> None:
         """Batch set checkbox state for an option column across all playlists."""
@@ -562,23 +566,68 @@ class MainWindow(QMainWindow):
     # ----- Checkbox cascading -----
 
     def _on_item_changed(self, item: QStandardItem) -> None:
-        """When a folder checkbox changes, cascade to children."""
+        """When a folder or playlist checkbox changes, cascade to children and parents."""
+        if getattr(self, "_is_updating_checks", False):
+            return
         if item.column() != COL_CHECK:
             return
-        is_folder = item.data(ROLE_IS_FOLDER)
-        if not is_folder:
-            return
-        self._model.blockSignals(True)
-        self._set_children_check(item, item.checkState())
-        self._model.blockSignals(False)
+
+        self._is_updating_checks = True
+        try:
+            state = item.checkState()
+            is_folder = item.data(ROLE_IS_FOLDER)
+
+            # Cascade downwards to all children
+            if is_folder and item.hasChildren():
+                self._set_children_check(item, state)
+
+            # Update parent folder state upwards
+            parent = item.parent()
+            if parent:
+                self._update_parent_check_state(parent)
+        finally:
+            self._is_updating_checks = False
 
     def _set_children_check(self, parent: QStandardItem, state: Qt.CheckState) -> None:
+        """Recursively set check state on all descendant items."""
+        target_state = Qt.Checked if state == Qt.Checked else Qt.Unchecked
         for row in range(parent.rowCount()):
             child = parent.child(row, COL_CHECK)
             if child:
-                child.setCheckState(state)
+                child.setCheckState(target_state)
                 if child.hasChildren():
-                    self._set_children_check(child, state)
+                    self._set_children_check(child, target_state)
+
+    def _update_parent_check_state(self, parent: QStandardItem) -> None:
+        """Update parent item checkState based on its children states."""
+        if not parent:
+            return
+        checked_count = 0
+        total_count = 0
+        has_partial = False
+
+        for row in range(parent.rowCount()):
+            child = parent.child(row, COL_CHECK)
+            if child:
+                total_count += 1
+                c_state = child.checkState()
+                if c_state == Qt.Checked:
+                    checked_count += 1
+                elif c_state == Qt.PartiallyChecked:
+                    has_partial = True
+
+        if total_count > 0:
+            if checked_count == total_count:
+                parent.setCheckState(Qt.Checked)
+            elif checked_count == 0 and not has_partial:
+                parent.setCheckState(Qt.Unchecked)
+            else:
+                parent.setCheckState(Qt.PartiallyChecked)
+
+        # Recurse upwards to grandparents
+        grand_parent = parent.parent()
+        if grand_parent:
+            self._update_parent_check_state(grand_parent)
 
     # ----- Output folder -----
 
@@ -673,23 +722,23 @@ class MainWindow(QMainWindow):
         thread.start()
 
     def _collect_selected(self, parent: QStandardItem, result: List[str]) -> None:
-        """Collect path strings of checked items (folders and playlists)."""
+        """Collect path strings of checked and partially checked items."""
         for row in range(parent.rowCount()):
             item = parent.child(row, COL_CHECK)
             if not item:
                 continue
-            if item.checkState() != Qt.Checked:
+            path_str = item.data(ROLE_PATH)
+            state = item.checkState()
+
+            if state in (Qt.Checked, Qt.PartiallyChecked):
+                if path_str and path_str not in result:
+                    result.append(path_str)
                 if item.hasChildren():
                     self._collect_selected(item, result)
-                continue
-            path_str = item.data(ROLE_PATH)
-            is_folder = item.data(ROLE_IS_FOLDER)
-            if is_folder:
-                if path_str:
-                    result.append(path_str)
             else:
-                if path_str:
-                    result.append(path_str)
+                if item.hasChildren():
+                    self._collect_selected(item, result)
+
 
     @Slot(str)
     def _on_export_error(self, msg: str) -> None:
