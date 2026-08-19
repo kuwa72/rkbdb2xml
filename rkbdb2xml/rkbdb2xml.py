@@ -25,11 +25,12 @@ DEFAULT_XML_FILENAME = "rekordbox.xml"
 
 try:
     from romann import RomanConverter
-except ImportError:
+except Exception:
     class RomanConverter:  # type: ignore
         """Fallback RomanConverter when romann package is not available."""
         def to_roman(self, text: str) -> str:
             return text
+
 
 
 class RekordboxXMLExporter:

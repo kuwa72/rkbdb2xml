@@ -2,15 +2,39 @@
 
 
 import os
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 icon_path = 'assets/icon.ico' if os.path.exists('assets/icon.ico') else 'assets/icon.png'
+
+packages_to_collect = [
+    'romann',
+    'pykakasi',
+    'sudachipy',
+    'sudachidict_full',
+    'sudachidict_core',
+    'pyrekordbox',
+    'mutagen',
+]
+
+datas = [('assets', 'assets')]
+hiddenimports = []
+
+for pkg in packages_to_collect:
+    try:
+        datas += collect_data_files(pkg)
+    except Exception:
+        pass
+    try:
+        hiddenimports += collect_submodules(pkg)
+    except Exception:
+        pass
 
 a = Analysis(
     ['run_gui.py'],
     pathex=[],
     binaries=[],
-    datas=[('assets', 'assets')],
-    hiddenimports=[],
+    datas=datas,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
