@@ -23,6 +23,15 @@ import shutil
 REKORDBOX_VERSION = "6.8.0"
 DEFAULT_XML_FILENAME = "rekordbox.xml"
 
+try:
+    from romann import RomanConverter
+except ImportError:
+    class RomanConverter:  # type: ignore
+        """Fallback RomanConverter when romann package is not available."""
+        def to_roman(self, text: str) -> str:
+            return text
+
+
 class RekordboxXMLExporter:
     """
     Export Rekordbox database to XML format similar to Rekordbox XML export.
@@ -83,17 +92,23 @@ class RekordboxXMLExporter:
         """
         try:
             self.db = RekordboxDatabase(db_path, db_key)
-        except Exception:
+        except Exception as e:
             key = self._download_rekordbox_key()
-            self.db = RekordboxDatabase(key=key)
+            if key:
+                self.db = RekordboxDatabase(db_path, key=key)
+            else:
+                raise e
 
     def _check_rekordbox_running(self):
         """
         Check if Rekordbox is currently running and warn the user if it is.
         """
-        for proc in psutil.process_iter(["name"]):
-            if "rekordbox" in proc.info["name"].lower():
-                return True
+        try:
+            for proc in psutil.process_iter(["name"]):
+                if "rekordbox" in proc.info["name"].lower():
+                    return True
+        except Exception:
+            pass
         return False
 
     def _download_rekordbox_key(self) -> Optional[str]:
@@ -102,14 +117,19 @@ class RekordboxXMLExporter:
         Returns:
             The downloaded key if successful, None otherwise
         """
-        config = get_config("rekordbox6")
-        if config and "dp" in config and config["dp"]:
-            return config["dp"]
+        try:
+            config = get_config("rekordbox6")
+            if config and "dp" in config and config["dp"]:
+                return config["dp"]
 
-        # キャッシュがなければKeyExtractorで取得
-        pioneer_install_dir = get_pioneer_install_dir()
-        extractor = KeyExtractor(str(pioneer_install_dir))
-        return extractor.run()
+            pioneer_install_dir = get_pioneer_install_dir()
+            if pioneer_install_dir and Path(pioneer_install_dir).exists():
+                extractor = KeyExtractor(str(pioneer_install_dir))
+                return extractor.run()
+        except Exception:
+            pass
+        return None
+
 
     def generate_xml(self, path: str) -> None:
         """
