@@ -1113,15 +1113,18 @@ class MainWindow(QMainWindow):
             return
 
         try:
-            # 1. Stop any current playback and reset slider & time
-            self._player.stop()
-            self._player.setPosition(0)
-            self._seek_slider.setValue(0)
-            self._time_curr_label.setText("00:00")
+            target_str = str(p)
+            # If same track is already loaded and not stopped, just rewind and play
+            if self._current_playing_file == target_str and self._player.playbackState() != QMediaPlayer.PlaybackState.StoppedState:
+                self._player.setPosition(0)
+                self._player.play()
+                self._player_track_label.setText(f"🎵 再生中: {title}")
+                self._player_track_label.setStyleSheet("font-weight: bold; color: #1a73e8;")
+                return
 
-            # 2. Set new source and trigger playback
-            self._current_playing_file = str(p)
-            self._player.setSource(QUrl.fromLocalFile(str(p)))
+            self._current_playing_file = target_str
+            self._player.stop()
+            self._player.setSource(QUrl.fromLocalFile(target_str))
             self._player.play()
 
             self._player_track_label.setText(f"🎵 再生中: {title}")
@@ -1131,11 +1134,18 @@ class MainWindow(QMainWindow):
             self._player_track_label.setStyleSheet("font-weight: bold; color: #dc2626;")
 
     def _on_player_media_status_changed(self, status: Any) -> None:
-        """Handle media end of playback or load changes."""
+        """Handle media end of playback safely without interrupting track changes."""
         if not self._player:
             return
         if HAS_MULTIMEDIA and status == QMediaPlayer.MediaStatus.EndOfMedia:
-            self._stop_playback()
+            dur = self._player.duration()
+            pos = self._player.position()
+            # Only stop when actually reaching near the end of track (ignores flush events during setSource)
+            if dur > 1000 and pos >= (dur - 1000):
+                self._stop_playback()
+            elif dur <= 1000 and pos > 0:
+                self._stop_playback()
+
 
     def _on_player_error_occurred(self, error: Any, error_string: str) -> None:
         """Handle player playback error."""
