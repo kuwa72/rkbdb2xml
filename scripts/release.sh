@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 
-VERSION="v0.5.0"
+VERSION="v0.5.1"
 
 echo "=== Staging changes ==="
 git add .gitignore README.md pyproject.toml rkbdb2xml/ tests/ .github/ assets/ rkbdb2xml-gui*.spec run_gui.py scripts/

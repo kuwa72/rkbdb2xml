@@ -582,6 +582,16 @@ class MainWindow(QMainWindow):
         self._preview_table = QTableView()
         self._preview_table.setModel(self._preview_model)
         self._preview_table.setAlternatingRowColors(True)
+        self._preview_table.setSelectionBehavior(QTableView.SelectRows)
+        self._preview_table.setSelectionMode(QTableView.SingleSelection)
+        self._preview_table.setEditTriggers(QTableView.NoEditTriggers)
+        self._preview_table.horizontalHeader().setStretchLastSection(False)
+        self._preview_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self._preview_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)
+        self._preview_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self._preview_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Interactive)
+        self._preview_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self._preview_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
         # Double click to play
         self._preview_table.doubleClicked.connect(self._on_preview_table_double_clicked)
         preview_layout.addWidget(self._preview_table, 1)
@@ -1022,6 +1032,9 @@ class MainWindow(QMainWindow):
                 bpm_item_table = QStandardItem(f"{bpm_val:.1f}" if bpm_val else "-")
                 file_item = QStandardItem(file_status)
 
+                for it in (num_item, orig_title_item, conv_title_item, artist_item, bpm_item_table, file_item):
+                    it.setEditable(False)
+
                 conv_title_item.setToolTip(f"出力ファイル内タグ & XML名: {conv_title}")
                 if loc:
                     file_item.setToolTip(f"元ファイルパス: {loc}")
@@ -1029,6 +1042,7 @@ class MainWindow(QMainWindow):
                 self._preview_model.appendRow([
                     num_item, orig_title_item, conv_title_item, artist_item, bpm_item_table, file_item
                 ])
+
 
 
         except Exception as e:
