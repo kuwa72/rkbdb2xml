@@ -180,14 +180,16 @@ class ExportWorker(QObject):
 # ---------------------------------------------------------------------------
 def format_bytes(bytes_val: int) -> str:
     """Format bytes into a human-readable string (B, KB, MB, GB)."""
-    if bytes_val < 1024:
-        return f"{bytes_val} B"
-    elif bytes_val < 1024 * 1024:
-        return f"{bytes_val / 1024:.1f} KB"
-    elif bytes_val < 1024 * 1024 * 1024:
-        return f"{bytes_val / (1024 * 1024):.1f} MB"
+    val = max(0, int(bytes_val))
+    if val < 1024:
+        return f"{val} B"
+    elif val < 1024 * 1024:
+        return f"{val / 1024:.1f} KB"
+    elif val < 1024 * 1024 * 1024:
+        return f"{val / (1024 * 1024):.1f} MB"
     else:
-        return f"{bytes_val / (1024 * 1024 * 1024):.2f} GB"
+        return f"{val / (1024 * 1024 * 1024):.2f} GB"
+
 
 
 def format_time(ms: int) -> str:
@@ -310,17 +312,21 @@ class SizeCalculatorWorker(QObject):
                         except Exception:
                             pass
 
-                # 2. Check DB FileSize attribute
+                # 2. Check DB FileSize attribute (restoring signed 32-bit int overflow in Rekordbox)
                 if not is_exact:
                     fsize = getattr(content, "FileSize", None)
                     if fsize is not None:
                         try:
                             fs_int = int(fsize)
-                            if 100_000 <= fs_int <= 5_000_000_000:
+                            if fs_int < 0:
+                                # Rekordbox stores 32-bit signed integer; restore to unsigned (up to ~4.29GB)
+                                fs_int = fs_int & 0xFFFFFFFF
+                            if 100_000 <= fs_int <= 10_000_000_000:
                                 track_size = fs_int
                                 is_exact = True
                         except (ValueError, TypeError):
                             pass
+
 
                 # 3. Heuristic estimation from Length and BitRate / File extension
                 if not is_exact:
