@@ -9,3 +9,5 @@ def test_format_bytes():
     assert format_bytes(15 * 1024 * 1024) == "15.0 MB"
     assert format_bytes(1024 * 1024 * 1024) == "1.00 GB"
     assert format_bytes(int(14.8 * 1024 * 1024 * 1024)) == "14.80 GB"
+    assert format_bytes(int(29.3 * 1024 * 1024 * 1024)) == "29.30 GB"
+

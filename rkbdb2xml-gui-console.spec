@@ -14,6 +14,7 @@ packages_to_collect = [
     'sudachidict_core',
     'pyrekordbox',
     'mutagen',
+    'PySide6.QtMultimedia',
 ]
 
 datas = [('assets', 'assets')]

@@ -48,6 +48,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QSlider,
     QSplitter,
     QTableView,
     QToolButton,
@@ -55,6 +56,13 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+try:
+    from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+    HAS_MULTIMEDIA = True
+except ImportError:
+    HAS_MULTIMEDIA = False
+
 
 from pyrekordbox.db6 import Rekordbox6Database as RekordboxDatabase
 
@@ -98,6 +106,9 @@ COL_SORT = 3  # Sort order option
 ROLE_PATH = Qt.UserRole + 1  # hierarchical path string
 ROLE_IS_FOLDER = Qt.UserRole + 2  # bool
 ROLE_PL_ID = Qt.UserRole + 3  # playlist ID
+ROLE_FILE_PATH = Qt.UserRole + 4  # local audio file path string
+ROLE_TRACK_TITLE = Qt.UserRole + 5  # track title string
+
 
 
 # ---------------------------------------------------------------------------
@@ -179,12 +190,22 @@ def format_bytes(bytes_val: int) -> str:
         return f"{bytes_val / (1024 * 1024 * 1024):.2f} GB"
 
 
+def format_time(ms: int) -> str:
+    """Format milliseconds into mm:ss format."""
+    total_sec = max(0, int(ms) // 1000)
+    minutes = total_sec // 60
+    seconds = total_sec % 60
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+
 # ---------------------------------------------------------------------------
 # Size calculator worker (Async)
 # ---------------------------------------------------------------------------
 class SizeCalculatorWorker(QObject):
     """Calculates total track count and size for selected playlists asynchronously."""
-    finished = Signal(int, int, int, int)  # (playlist_count, unique_track_count, total_bytes, missing_count)
+    # (playlist_count, unique_track_count, total_bytes, exact_count, estimated_count)
+    finished = Signal(int, int, int, int, int)
 
     def __init__(self, selected_paths: List[str], db_path: Optional[str] = None) -> None:
         super().__init__()
@@ -198,7 +219,7 @@ class SizeCalculatorWorker(QObject):
     @Slot()
     def run(self) -> None:
         if not self._selected_paths or self._is_cancelled:
-            self.finished.emit(0, 0, 0, 0)
+            self.finished.emit(0, 0, 0, 0, 0)
             return
 
         try:
@@ -206,7 +227,13 @@ class SizeCalculatorWorker(QObject):
             all_pls = db.get_playlist().all()
 
             # Map hierarchical paths to playlist objects
-            id_map = {pl.ID: pl for pl in all_pls}
+            id_map: Dict[Any, Any] = {}
+            for pl in all_pls:
+                id_map[pl.ID] = pl
+                id_map[str(pl.ID)] = pl
+                if str(pl.ID).isdigit():
+                    id_map[int(pl.ID)] = pl
+
             parent_map: Dict[Any, list] = {}
             for pl in all_pls:
                 parent_map.setdefault(pl.ParentID, []).append(pl)
@@ -232,7 +259,7 @@ class SizeCalculatorWorker(QObject):
                         target_pls.append(pl)
 
             if not target_pls or self._is_cancelled:
-                self.finished.emit(0, 0, 0, 0)
+                self.finished.emit(0, 0, 0, 0, 0)
                 return
 
             # Collect unique track IDs
@@ -244,54 +271,102 @@ class SizeCalculatorWorker(QObject):
                 for entry in entries:
                     cid = getattr(entry, "ContentID", None) or getattr(entry, "ID", None)
                     if cid is not None:
-                        unique_track_ids.add(cid)
+                        unique_track_ids.add(str(cid))
 
             # Query track sizes
             from .rkbdb2xml import RekordboxXMLExporter
             resolver = RekordboxXMLExporter.__new__(RekordboxXMLExporter)
             all_contents = db.get_content().all()
-            content_map = {c.ID: c for c in all_contents}
+            content_map: Dict[str, Any] = {}
+            for c in all_contents:
+                content_map[str(c.ID)] = c
 
             total_bytes = 0
-            missing_count = 0
+            exact_count = 0
+            estimated_count = 0
 
             for cid in unique_track_ids:
                 if self._is_cancelled:
                     return
                 content = content_map.get(cid)
                 if not content:
+                    estimated_count += 1
+                    total_bytes += 10 * 1024 * 1024
                     continue
 
-                # 1. Try DB FileSize attribute
-                fsize = getattr(content, "FileSize", None)
-                if fsize and str(fsize).isdigit() and int(fsize) > 0:
-                    total_bytes += int(fsize)
-                    continue
+                track_size = 0
+                is_exact = False
 
-                # 2. Try disk file
+                # 1. Check local file on disk
                 loc = getattr(content, "FolderPath", None)
-                found = False
                 if loc:
                     p = resolver._resolve_file_path(loc)
-                    if p and p.exists():
+                    if p and p.exists() and p.is_file():
                         try:
-                            total_bytes += p.stat().st_size
-                            found = True
+                            s = p.stat().st_size
+                            if s > 0:
+                                track_size = s
+                                is_exact = True
                         except Exception:
                             pass
 
-                if not found:
-                    missing_count += 1
-                    total_bytes += 10 * 1024 * 1024  # Estimate ~10MB per track
+                # 2. Check DB FileSize attribute
+                if not is_exact:
+                    fsize = getattr(content, "FileSize", None)
+                    if fsize is not None:
+                        try:
+                            fs_int = int(fsize)
+                            if 100_000 <= fs_int <= 5_000_000_000:
+                                track_size = fs_int
+                                is_exact = True
+                        except (ValueError, TypeError):
+                            pass
+
+                # 3. Heuristic estimation from Length and BitRate / File extension
+                if not is_exact:
+                    estimated_count += 1
+                    duration = getattr(content, "Length", None)
+                    bitrate = getattr(content, "BitRate", None)
+
+                    try:
+                        dur_sec = float(duration) if (duration and float(duration) > 0) else 240.0
+                    except (ValueError, TypeError):
+                        dur_sec = 240.0
+
+                    ext = ""
+                    if loc:
+                        ext = Path(str(loc)).suffix.lower()
+
+                    if ext in (".wav", ".aif", ".aiff"):
+                        track_size = int(dur_sec * 176_400)
+                    elif ext in (".flac", ".alac"):
+                        track_size = int(dur_sec * 100_000)
+                    elif bitrate:
+                        try:
+                            br_kbps = float(bitrate) if float(bitrate) > 0 else 320.0
+                            track_size = int(dur_sec * (br_kbps * 1000 / 8))
+                        except (ValueError, TypeError):
+                            track_size = int(dur_sec * 40_000)
+                    else:
+                        track_size = int(dur_sec * 40_000)
+
+                    track_size = max(1_000_000, track_size)
+                else:
+                    exact_count += 1
+
+                total_bytes += max(0, track_size)
+
+            total_bytes = max(0, total_bytes)
 
             if not self._is_cancelled:
                 self.finished.emit(
-                    len(target_pls), len(unique_track_ids), total_bytes, missing_count
+                    len(target_pls), len(unique_track_ids), total_bytes, exact_count, estimated_count
                 )
 
         except Exception:
             if not self._is_cancelled:
-                self.finished.emit(0, 0, 0, 0)
+                self.finished.emit(0, 0, 0, 0, 0)
+
 
 
 # ---------------------------------------------------------------------------
@@ -324,7 +399,27 @@ class MainWindow(QMainWindow):
         self._calc_timer.setSingleShot(True)
         self._calc_timer.timeout.connect(self._start_async_size_calculation)
 
+        # Media player for previewing audio
+        self._player: Optional[Any] = None
+        self._audio_output: Optional[Any] = None
+        self._is_seeking = False
+        self._current_playing_file = ""
+
+        if HAS_MULTIMEDIA:
+            try:
+                self._player = QMediaPlayer(self)
+                self._audio_output = QAudioOutput(self)
+                self._player.setAudioOutput(self._audio_output)
+                self._audio_output.setVolume(0.7)
+                self._player.positionChanged.connect(self._on_player_position_changed)
+                self._player.durationChanged.connect(self._on_player_duration_changed)
+                self._player.playbackStateChanged.connect(self._on_player_state_changed)
+            except Exception as e:
+                print("[WARN] QMediaPlayer init failed:", e)
+                self._player = None
+
         self._build_ui()
+
 
         self._check_rekordbox_status()
         self._load_playlists()
@@ -487,19 +582,74 @@ class MainWindow(QMainWindow):
         self._preview_table = QTableView()
         self._preview_table.setModel(self._preview_model)
         self._preview_table.setAlternatingRowColors(True)
-        self._preview_table.setSelectionBehavior(QTableView.SelectRows)
-        self._preview_table.setEditTriggers(QTableView.NoEditTriggers)
-        self._preview_table.horizontalHeader().setStretchLastSection(False)
-        self._preview_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        self._preview_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Interactive)
-        self._preview_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
-        self._preview_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Interactive)
-        self._preview_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
-        self._preview_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        # Double click to play
+        self._preview_table.doubleClicked.connect(self._on_preview_table_double_clicked)
         preview_layout.addWidget(self._preview_table, 1)
+
+        # --- Mini Audio Player Panel ---
+        player_frame = QFrame()
+        player_frame.setStyleSheet(
+            "QFrame { background-color: #f1f3f4; border: 1px solid #dadce0; "
+            "border-radius: 6px; padding: 4px; }"
+        )
+        player_layout = QVBoxLayout(player_frame)
+        player_layout.setContentsMargins(8, 4, 8, 4)
+        player_layout.setSpacing(4)
+
+        # Player top row: Controls & current track
+        player_top = QHBoxLayout()
+        self._play_btn = QPushButton("▶️ 再生")
+        self._play_btn.setToolTip("選択中の曲を再生/一時停止 (曲をダブルクリックでも再生できます)")
+        self._play_btn.setStyleSheet("font-weight: bold; padding: 3px 12px;")
+        self._play_btn.clicked.connect(self._toggle_playback)
+        player_top.addWidget(self._play_btn)
+
+        self._stop_btn = QPushButton("⏹️ 停止")
+        self._stop_btn.setStyleSheet("padding: 3px 10px;")
+        self._stop_btn.clicked.connect(self._stop_playback)
+        player_top.addWidget(self._stop_btn)
+
+        self._player_track_label = QLabel("🎧 試聴: 曲をダブルクリックまたは選択して「▶️ 再生」")
+        self._player_track_label.setStyleSheet("font-weight: bold; color: #3c4043; padding-left: 6px;")
+        player_top.addWidget(self._player_track_label, 1)
+
+        player_layout.addLayout(player_top)
+
+        # Player bottom row: Seekbar, Time, Volume
+        player_bot = QHBoxLayout()
+        self._time_curr_label = QLabel("00:00")
+        self._time_curr_label.setStyleSheet("font-size: 11px; color: #5f6368;")
+        player_bot.addWidget(self._time_curr_label)
+
+        self._seek_slider = QSlider(Qt.Horizontal)
+        self._seek_slider.setRange(0, 1000)
+        self._seek_slider.setValue(0)
+        self._seek_slider.sliderMoved.connect(self._on_seek_slider_moved)
+        self._seek_slider.sliderPressed.connect(self._on_seek_slider_pressed)
+        self._seek_slider.sliderReleased.connect(self._on_seek_slider_released)
+        player_bot.addWidget(self._seek_slider, 1)
+
+        self._time_total_label = QLabel("00:00")
+        self._time_total_label.setStyleSheet("font-size: 11px; color: #5f6368;")
+        player_bot.addWidget(self._time_total_label)
+
+        vol_icon = QLabel("🔊")
+        player_bot.addWidget(vol_icon)
+
+        self._vol_slider = QSlider(Qt.Horizontal)
+        self._vol_slider.setRange(0, 100)
+        self._vol_slider.setValue(70)
+        self._vol_slider.setMaximumWidth(80)
+        self._vol_slider.setToolTip("音量調節")
+        self._vol_slider.valueChanged.connect(self._on_volume_changed)
+        player_bot.addWidget(self._vol_slider)
+
+        player_layout.addLayout(player_bot)
+        preview_layout.addWidget(player_frame)
 
         self._splitter.addWidget(preview_container)
         self._splitter.setSizes([450, 550])
+
 
         layout.addWidget(self._splitter, 1)
 
@@ -849,17 +999,23 @@ class MainWindow(QMainWindow):
                 if use_bpm and bpm_val:
                     conv_title = f"{int(bpm_val)} {conv_title}"
 
-                # Check file existence
+                # Check file existence and resolve path
                 file_status = "❌ なし"
+                resolved_path_str = ""
                 if loc:
                     try:
                         p = path_resolver._resolve_file_path(loc)
-                        if p and p.exists():
+                        if p and p.exists() and p.is_file():
                             file_status = "⭕ 存在"
+                            resolved_path_str = str(p)
                     except Exception:
                         pass
 
                 num_item = QStandardItem(str(i))
+                num_item.setData(resolved_path_str, ROLE_FILE_PATH)
+                display_track_name = f"{conv_title} - {conv_artist}" if conv_artist else conv_title
+                num_item.setData(display_track_name, ROLE_TRACK_TITLE)
+
                 orig_title_item = QStandardItem(raw_title)
                 conv_title_item = QStandardItem(conv_title)
                 artist_item = QStandardItem(conv_artist)
@@ -874,8 +1030,117 @@ class MainWindow(QMainWindow):
                     num_item, orig_title_item, conv_title_item, artist_item, bpm_item_table, file_item
                 ])
 
+
         except Exception as e:
             self._preview_header.setText(f"🎵 プレイリスト: {path_str} (読み込みエラー: {e})")
+
+    # ----- Audio Player Controls -----
+
+    def _on_preview_table_double_clicked(self, index: QModelIndex) -> None:
+        """Play track when double clicking row in preview table."""
+        if not index.isValid():
+            return
+        row = index.row()
+        num_item = self._preview_model.item(row, 0)
+        if not num_item:
+            return
+        file_path = num_item.data(ROLE_FILE_PATH)
+        title = num_item.data(ROLE_TRACK_TITLE)
+        if file_path:
+            self._play_audio_file(file_path, title)
+        else:
+            self._player_track_label.setText("⚠️ ローカルに実ファイルが見つからないため試聴できません")
+            self._player_track_label.setStyleSheet("font-weight: bold; color: #dc2626;")
+
+    def _toggle_playback(self) -> None:
+        """Toggle play/pause for selected track in preview table."""
+        if not HAS_MULTIMEDIA or not self._player:
+            QMessageBox.information(self, "プレイヤー未対応", "この環境ではマルチメディア再生がサポートされていません。")
+            return
+
+        if self._player.playbackState() == QMediaPlayer.PlayingState:
+            self._player.pause()
+            return
+        elif self._player.playbackState() == QMediaPlayer.PausedState:
+            self._player.play()
+            return
+
+        # If stopped, play currently selected row in preview table
+        sel = self._preview_table.selectionModel().currentIndex()
+        if sel.isValid():
+            self._on_preview_table_double_clicked(sel)
+        else:
+            # Try first row if available
+            if self._preview_model.rowCount() > 0:
+                idx = self._preview_model.index(0, 0)
+                self._preview_table.selectionModel().setCurrentIndex(
+                    idx, self._preview_table.selectionModel().SelectionFlag.ClearAndSelect
+                )
+                self._on_preview_table_double_clicked(idx)
+
+    def _play_audio_file(self, file_path: str, title: str) -> None:
+        """Load and start playing local audio file."""
+        if not HAS_MULTIMEDIA or not self._player:
+            return
+
+        p = Path(file_path)
+        if not p.exists() or not p.is_file():
+            self._player_track_label.setText(f"⚠️ ファイルが見つかりません: {p.name}")
+            self._player_track_label.setStyleSheet("font-weight: bold; color: #dc2626;")
+            return
+
+        self._current_playing_file = str(p)
+        self._player.setSource(QUrl.fromLocalFile(str(p)))
+        self._player.play()
+        self._player_track_label.setText(f"🎵 再生中: {title}")
+        self._player_track_label.setStyleSheet("font-weight: bold; color: #1a73e8;")
+
+    def _stop_playback(self) -> None:
+        """Stop playing audio."""
+        if self._player:
+            self._player.stop()
+            self._seek_slider.setValue(0)
+            self._time_curr_label.setText("00:00")
+            self._player_track_label.setText("🎧 試聴: 停止中")
+            self._player_track_label.setStyleSheet("font-weight: bold; color: #5f6368;")
+
+    def _on_seek_slider_pressed(self) -> None:
+        self._is_seeking = True
+
+    def _on_seek_slider_released(self) -> None:
+        if self._player:
+            dur = self._player.duration()
+            pos = int((self._seek_slider.value() / 1000.0) * dur)
+            self._player.setPosition(pos)
+        self._is_seeking = False
+
+    def _on_seek_slider_moved(self, value: int) -> None:
+        if self._player:
+            dur = self._player.duration()
+            curr_ms = int((value / 1000.0) * dur)
+            self._time_curr_label.setText(format_time(curr_ms))
+
+    def _on_volume_changed(self, value: int) -> None:
+        if self._audio_output:
+            self._audio_output.setVolume(value / 100.0)
+
+    def _on_player_position_changed(self, position: int) -> None:
+        if not self._is_seeking:
+            dur = self._player.duration() if self._player else 0
+            if dur > 0:
+                val = int((position / dur) * 1000)
+                self._seek_slider.setValue(val)
+            self._time_curr_label.setText(format_time(position))
+
+    def _on_player_duration_changed(self, duration: int) -> None:
+        self._time_total_label.setText(format_time(duration))
+
+    def _on_player_state_changed(self, state: Any) -> None:
+        if state == QMediaPlayer.PlayingState:
+            self._play_btn.setText("⏸️ 一時停止")
+        else:
+            self._play_btn.setText("▶️ 再生")
+
 
     def _count_playlists(self, parent: QStandardItem) -> int:
         count = 0
@@ -967,7 +1232,7 @@ class MainWindow(QMainWindow):
         self._collect_selected(root, selected_paths)
 
         if not selected_paths:
-            self._on_size_calculated(0, 0, 0, 0)
+            self._on_size_calculated(0, 0, 0, 0, 0)
             return
 
         worker = SizeCalculatorWorker(selected_paths)
@@ -984,33 +1249,72 @@ class MainWindow(QMainWindow):
         self._calc_thread = thread
         thread.start()
 
-    @Slot(int, int, int, int)
+    @Slot(int, int, int, int, int)
     def _on_size_calculated(
-        self, playlist_count: int, track_count: int, total_bytes: int, missing_count: int
+        self,
+        playlist_count: int,
+        track_count: int,
+        total_bytes: int,
+        exact_count: int,
+        estimated_count: int,
     ) -> None:
         """Handle computed size and update summary label and capacity meter."""
+        if playlist_count == 0 or track_count == 0 or total_bytes == 0:
+            self._summary_label.setText("📊 選択中: 0 プレイリスト (0 曲 / 0 B)")
+            self._capacity_label.setText("💾 16GB USBメモリ目安 (実効約14.8GB): 0 B / 14.8 GB (0.0% 使用)")
+            self._capacity_label.setStyleSheet("font-size: 12px; color: #495057;")
+            return
+
         size_str = format_bytes(total_bytes)
+
+        breakdown = ""
+        if estimated_count > 0:
+            breakdown = f" (実ファイル: {exact_count}曲 / 推定: {estimated_count}曲)"
+
         self._summary_label.setText(
-            f"📊 エクスポート対象: {playlist_count} プレイリスト (全 {track_count} 曲 / 約 {size_str})"
+            f"📊 選択中: {playlist_count} プレイリスト ｜ 全 {track_count:,} 曲 ｜ 合計 約 {size_str}{breakdown}"
         )
 
-        # 16GB usable capacity is approx 14.8 GB
-        USB_16GB_BYTES = 14.8 * 1024 * 1024 * 1024
-        ratio = (total_bytes / USB_16GB_BYTES) * 100.0
-        remaining_bytes = USB_16GB_BYTES - total_bytes
+        # Usable capacities: 16GB ≒ 14.8 GB, 32GB ≒ 29.5 GB, 64GB ≒ 59.0 GB
+        USB_16GB = 14.8 * 1024 * 1024 * 1024
+        USB_32GB = 29.5 * 1024 * 1024 * 1024
+        USB_64GB = 59.0 * 1024 * 1024 * 1024
 
-        if remaining_bytes >= 0:
-            rem_str = format_bytes(int(remaining_bytes))
+        ratio_16g = (total_bytes / USB_16GB) * 100.0
+
+        if total_bytes <= USB_16GB:
+            rem = USB_16GB - total_bytes
+            rem_str = format_bytes(int(rem))
             self._capacity_label.setText(
-                f"・ 16GB USBメモリ目安: {ratio:.1f}% 使用 (残り {rem_str})"
+                f"💾 16GB USBメモリ目安: {size_str} / 14.8 GB ({ratio_16g:.1f}% 使用 ｜ 残り {rem_str})  ⭕ 収まります"
             )
             self._capacity_label.setStyleSheet("font-size: 12px; color: #2e7d32; font-weight: bold;")
-        else:
-            over_str = format_bytes(int(-remaining_bytes))
+        elif total_bytes <= USB_32GB:
+            over = total_bytes - USB_16GB
+            over_str = format_bytes(int(over))
+            rem_32 = USB_32GB - total_bytes
+            rem_32_str = format_bytes(int(rem_32))
             self._capacity_label.setText(
-                f"⚠️ 16GB容量超過: {ratio:.1f}% (+{over_str} 超過)"
+                f"⚠️ 16GB容量オーバー: {size_str} / 14.8 GB ({ratio_16g:.1f}% ｜ +{over_str} 超過 ❌) ➔ 32GB USBメモリ推奨 (残 {rem_32_str})"
             )
-            self._capacity_label.setStyleSheet("font-size: 12px; color: #c62828; font-weight: bold;")
+            self._capacity_label.setStyleSheet("font-size: 12px; color: #d97706; font-weight: bold;")
+        elif total_bytes <= USB_64GB:
+            over = total_bytes - USB_16GB
+            over_str = format_bytes(int(over))
+            rem_64 = USB_64GB - total_bytes
+            rem_64_str = format_bytes(int(rem_64))
+            self._capacity_label.setText(
+                f"⚠️ 16GB容量オーバー: {size_str} / 14.8 GB ({ratio_16g:.1f}% ｜ +{over_str} 超過 ❌) ➔ 64GB USBメモリ推奨 (残 {rem_64_str})"
+            )
+            self._capacity_label.setStyleSheet("font-size: 12px; color: #dc2626; font-weight: bold;")
+        else:
+            over = total_bytes - USB_16GB
+            over_str = format_bytes(int(over))
+            self._capacity_label.setText(
+                f"⚠️ 16GB大幅オーバー: {size_str} / 14.8 GB ({ratio_16g:.1f}% ｜ +{over_str} 超過 ❌) ➔ 128GB以上の大容量メディア推奨"
+            )
+            self._capacity_label.setStyleSheet("font-size: 12px; color: #dc2626; font-weight: bold;")
+
 
     # ----- Checkbox cascading -----
 
