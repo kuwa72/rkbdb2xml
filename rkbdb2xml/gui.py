@@ -420,9 +420,12 @@ class MainWindow(QMainWindow):
                 self._player.positionChanged.connect(self._on_player_position_changed)
                 self._player.durationChanged.connect(self._on_player_duration_changed)
                 self._player.playbackStateChanged.connect(self._on_player_state_changed)
+                self._player.mediaStatusChanged.connect(self._on_player_media_status_changed)
+                self._player.errorOccurred.connect(self._on_player_error_occurred)
             except Exception as e:
                 print("[WARN] QMediaPlayer init failed:", e)
                 self._player = None
+
 
         self._build_ui()
 
@@ -1099,21 +1102,46 @@ class MainWindow(QMainWindow):
                 self._on_preview_table_double_clicked(idx)
 
     def _play_audio_file(self, file_path: str, title: str) -> None:
-        """Load and start playing local audio file."""
+        """Load and start playing local audio file, properly resetting active player state."""
         if not HAS_MULTIMEDIA or not self._player:
             return
 
-        p = Path(file_path)
+        p = Path(file_path).resolve()
         if not p.exists() or not p.is_file():
             self._player_track_label.setText(f"⚠️ ファイルが見つかりません: {p.name}")
             self._player_track_label.setStyleSheet("font-weight: bold; color: #dc2626;")
             return
 
-        self._current_playing_file = str(p)
-        self._player.setSource(QUrl.fromLocalFile(str(p)))
-        self._player.play()
-        self._player_track_label.setText(f"🎵 再生中: {title}")
-        self._player_track_label.setStyleSheet("font-weight: bold; color: #1a73e8;")
+        try:
+            # 1. Stop any current playback and reset slider & time
+            self._player.stop()
+            self._player.setPosition(0)
+            self._seek_slider.setValue(0)
+            self._time_curr_label.setText("00:00")
+
+            # 2. Set new source and trigger playback
+            self._current_playing_file = str(p)
+            self._player.setSource(QUrl.fromLocalFile(str(p)))
+            self._player.play()
+
+            self._player_track_label.setText(f"🎵 再生中: {title}")
+            self._player_track_label.setStyleSheet("font-weight: bold; color: #1a73e8;")
+        except Exception as e:
+            self._player_track_label.setText(f"⚠️ 再生エラー: {e}")
+            self._player_track_label.setStyleSheet("font-weight: bold; color: #dc2626;")
+
+    def _on_player_media_status_changed(self, status: Any) -> None:
+        """Handle media end of playback or load changes."""
+        if not self._player:
+            return
+        if HAS_MULTIMEDIA and status == QMediaPlayer.MediaStatus.EndOfMedia:
+            self._stop_playback()
+
+    def _on_player_error_occurred(self, error: Any, error_string: str) -> None:
+        """Handle player playback error."""
+        if HAS_MULTIMEDIA and error != QMediaPlayer.Error.NoError:
+            self._player_track_label.setText(f"⚠️ 再生エラー: {error_string}")
+            self._player_track_label.setStyleSheet("font-weight: bold; color: #dc2626;")
 
     def _stop_playback(self) -> None:
         """Stop playing audio."""
@@ -1123,6 +1151,7 @@ class MainWindow(QMainWindow):
             self._time_curr_label.setText("00:00")
             self._player_track_label.setText("🎧 試聴: 停止中")
             self._player_track_label.setStyleSheet("font-weight: bold; color: #5f6368;")
+
 
     def _on_seek_slider_pressed(self) -> None:
         self._is_seeking = True
