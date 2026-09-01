@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rkbdb2xml"
-version = "0.5.4"
+version = "0.5.5"
 description = "Export Rekordbox database to XML format"
 readme = "README.md"
 authors = [

@@ -73,6 +73,9 @@ from .rkbdb2xml import export_rekordbox_db_to_xml
 # ---------------------------------------------------------------------------
 SETTINGS_FILE = Path.home() / ".rkbdb2xml_gui_settings.json"
 
+# How long to wait for QMediaPlayer to load a source before retrying / giving up
+PLAYER_LOAD_TIMEOUT_MS = 5000
+
 
 def get_default_output_dir() -> Path:
     """Return a user-friendly default export directory (Desktop or Home)."""
@@ -410,6 +413,16 @@ class MainWindow(QMainWindow):
         self._audio_output: Optional[Any] = None
         self._is_seeking = False
         self._current_playing_file = ""
+        # Deferred playback state: QMediaPlayer.setSource() is asynchronous, so
+        # play() must wait until the media is actually loaded.
+        self._pending_play_file = ""
+        self._pending_play_title = ""
+        self._pending_retry_done = False
+        self._current_track_title = ""
+        self._load_timeout_timer = QTimer(self)
+        self._load_timeout_timer.setSingleShot(True)
+        self._load_timeout_timer.setInterval(PLAYER_LOAD_TIMEOUT_MS)
+        self._load_timeout_timer.timeout.connect(self._on_load_timeout)
 
         if HAS_MULTIMEDIA:
             try:
@@ -1081,6 +1094,10 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "プレイヤー未対応", "この環境ではマルチメディア再生がサポートされていません。")
             return
 
+        # A load is in flight; playback starts automatically when it completes.
+        if self._pending_play_file:
+            return
+
         if self._player.playbackState() == QMediaPlayer.PlayingState:
             self._player.pause()
             return
@@ -1102,7 +1119,13 @@ class MainWindow(QMainWindow):
                 self._on_preview_table_double_clicked(idx)
 
     def _play_audio_file(self, file_path: str, title: str) -> None:
-        """Load and start playing local audio file, properly resetting active player state."""
+        """Load a local audio file and start playing once the media is ready.
+
+        QMediaPlayer.setSource() loads asynchronously, so calling play() right
+        after it races with the loader: the player reports PlayingState while
+        the pipeline never actually starts. Playback is therefore deferred to
+        the mediaStatusChanged handler.
+        """
         if not HAS_MULTIMEDIA or not self._player:
             return
 
@@ -1114,33 +1137,99 @@ class MainWindow(QMainWindow):
 
         try:
             target_str = str(p)
+            self._current_track_title = title
             # If same track is already loaded and not stopped, just rewind and play
-            if self._current_playing_file == target_str and self._player.playbackState() != QMediaPlayer.PlaybackState.StoppedState:
+            if (
+                self._current_playing_file == target_str
+                and not self._pending_play_file
+                and self._player.playbackState() != QMediaPlayer.PlaybackState.StoppedState
+            ):
                 self._player.setPosition(0)
                 self._player.play()
-                self._player_track_label.setText(f"🎵 再生中: {title}")
-                self._player_track_label.setStyleSheet("font-weight: bold; color: #1a73e8;")
+                self._set_playing_label(title)
                 return
 
-            self._current_playing_file = target_str
-            self._player.stop()
-            self._player.setSource(QUrl.fromLocalFile(target_str))
-            self._player.play()
-
-            self._player_track_label.setText(f"🎵 再生中: {title}")
-            self._player_track_label.setStyleSheet("font-weight: bold; color: #1a73e8;")
+            self._pending_retry_done = False
+            self._start_media_load(target_str, title)
         except Exception as e:
+            self._clear_pending_play()
             self._player_track_label.setText(f"⚠️ 再生エラー: {e}")
             self._player_track_label.setStyleSheet("font-weight: bold; color: #dc2626;")
 
-    def _on_player_media_status_changed(self, status: Any) -> None:
-        """Handle media end of playback safely without interrupting track changes."""
-        if not self._player:
+    def _start_media_load(self, target_str: str, title: str) -> None:
+        """Tear down the current media and request loading of ``target_str``."""
+        self._current_playing_file = target_str
+        self._pending_play_file = target_str
+        self._pending_play_title = title
+
+        self._player.stop()
+        # Clearing the source first forces a full teardown of the previous
+        # pipeline; without it a rapid track switch can leave the player stuck.
+        self._player.setSource(QUrl())
+        self._player.setSource(QUrl.fromLocalFile(target_str))
+
+        self._seek_slider.setValue(0)
+        self._time_curr_label.setText("00:00")
+        self._player_track_label.setText(f"⏳ 読み込み中: {title}")
+        self._player_track_label.setStyleSheet("font-weight: bold; color: #5f6368;")
+        self._load_timeout_timer.start()
+
+    def _set_playing_label(self, title: str) -> None:
+        self._player_track_label.setText(f"🎵 再生中: {title}")
+        self._player_track_label.setStyleSheet("font-weight: bold; color: #1a73e8;")
+
+    def _clear_pending_play(self) -> None:
+        self._pending_play_file = ""
+        self._pending_play_title = ""
+        self._load_timeout_timer.stop()
+
+    def _on_load_timeout(self) -> None:
+        """Recover when the media never reaches LoadedMedia."""
+        if not self._pending_play_file:
             return
-        if HAS_MULTIMEDIA and status == QMediaPlayer.MediaStatus.EndOfMedia:
+        target_str = self._pending_play_file
+        title = self._pending_play_title
+        if not self._pending_retry_done:
+            self._pending_retry_done = True
+            self._start_media_load(target_str, title)
+            return
+        self._clear_pending_play()
+        if self._player:
+            self._player.stop()
+        self._player_track_label.setText(f"⚠️ 読み込みに失敗しました: {title}")
+        self._player_track_label.setStyleSheet("font-weight: bold; color: #dc2626;")
+
+    def _on_player_media_status_changed(self, status: Any) -> None:
+        """Start deferred playback once loaded, and handle end of media."""
+        if not HAS_MULTIMEDIA or not self._player:
+            return
+
+        if status in (
+            QMediaPlayer.MediaStatus.LoadedMedia,
+            QMediaPlayer.MediaStatus.BufferedMedia,
+        ):
+            if self._pending_play_file:
+                title = self._pending_play_title
+                self._clear_pending_play()
+                self._player.setPosition(0)
+                self._player.play()
+                self._set_playing_label(title)
+            return
+
+        if status == QMediaPlayer.MediaStatus.InvalidMedia:
+            title = self._pending_play_title or self._current_track_title
+            self._clear_pending_play()
+            self._player_track_label.setText(f"⚠️ 再生できない形式です: {title}")
+            self._player_track_label.setStyleSheet("font-weight: bold; color: #dc2626;")
+            return
+
+        if status == QMediaPlayer.MediaStatus.EndOfMedia:
+            # Ignore flush events emitted while a new source is being loaded
+            if self._pending_play_file:
+                return
             dur = self._player.duration()
             pos = self._player.position()
-            # Only stop when actually reaching near the end of track (ignores flush events during setSource)
+            # Only stop when actually reaching near the end of track
             if dur > 1000 and pos >= (dur - 1000):
                 self._stop_playback()
             elif dur <= 1000 and pos > 0:
@@ -1150,11 +1239,16 @@ class MainWindow(QMainWindow):
     def _on_player_error_occurred(self, error: Any, error_string: str) -> None:
         """Handle player playback error."""
         if HAS_MULTIMEDIA and error != QMediaPlayer.Error.NoError:
+            # QMediaPlayer.source() already points at the new file by the time
+            # an aborted load reports its error, so the two cannot be told
+            # apart here. While a load is pending, keep it alive and let the
+            # load timeout decide: a real failure never reaches LoadedMedia.
             self._player_track_label.setText(f"⚠️ 再生エラー: {error_string}")
             self._player_track_label.setStyleSheet("font-weight: bold; color: #dc2626;")
 
     def _stop_playback(self) -> None:
         """Stop playing audio."""
+        self._clear_pending_play()
         if self._player:
             self._player.stop()
             self._seek_slider.setValue(0)
@@ -1197,8 +1291,13 @@ class MainWindow(QMainWindow):
     def _on_player_state_changed(self, state: Any) -> None:
         if state == QMediaPlayer.PlayingState:
             self._play_btn.setText("⏸️ 一時停止")
+            if not self._pending_play_file and self._current_track_title:
+                self._set_playing_label(self._current_track_title)
         else:
             self._play_btn.setText("▶️ 再生")
+            if state == QMediaPlayer.PausedState and self._current_track_title:
+                self._player_track_label.setText(f"⏸️ 一時停止: {self._current_track_title}")
+                self._player_track_label.setStyleSheet("font-weight: bold; color: #5f6368;")
 
 
     def _count_playlists(self, parent: QStandardItem) -> int:
