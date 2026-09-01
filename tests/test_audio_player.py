@@ -133,6 +133,10 @@ class Harness:
         self._pending_play_title = ""
         self._load_generation = 0
         self._load_attempt = 0
+        self._stall_recoveries = 0
+        self._eager_play = False
+        self._audio_output = None
+        self.rebuilt_audio_outputs = 0
         self._deferred = deferred
 
     # _start_media_load defers the real setSource via QTimer.singleShot; the
@@ -144,6 +148,21 @@ class Harness:
     def play(self, path, title):
         self._play_audio_file(path, title)
         self.run_deferred()
+
+    def finish_loading(self):
+        """Loader completes; play() is then scheduled for the next turn."""
+        self._player.finish_loading()
+        self.run_deferred()
+
+    # Kept off the Qt device APIs: the tests run without a QApplication.
+    def _audio_output_available(self):
+        return True
+
+    def _rebuild_audio_output(self):
+        self.rebuilt_audio_outputs += 1
+
+    def _audio_diagnostics(self):
+        return "device='fake'"
 
 
 @pytest.fixture()
@@ -181,7 +200,7 @@ def test_play_is_deferred_until_media_is_loaded(harness, track):
     assert harness._pending_play_file == track
     assert harness._load_timeout_timer.running
 
-    harness._player.finish_loading()
+    harness.finish_loading()
 
     assert harness._player.calls[-1] == "play"
     assert harness._pending_play_file == ""
@@ -193,7 +212,7 @@ def test_switching_while_a_track_is_playing_starts_the_new_track(harness, two_tr
     """stop() re-emits LoadedMedia for the old track; it must not eat the new one."""
     a, b = two_tracks
     harness.play(a, "A")
-    harness._player.finish_loading()
+    harness.finish_loading()
     assert harness._player.state == QMediaPlayer.PlaybackState.PlayingState
 
     harness.play(b, "B")  # double-click another track while A is playing
@@ -202,7 +221,7 @@ def test_switching_while_a_track_is_playing_starts_the_new_track(harness, two_tr
     assert harness._load_timeout_timer.running
     assert "読み込み中" in harness._player_track_label.text
 
-    harness._player.finish_loading()
+    harness.finish_loading()
 
     assert harness._player.sources[-1] == b
     assert harness._player.calls[-1] == "play"
@@ -214,7 +233,7 @@ def test_alternating_track_switches_all_start(harness, two_tracks):
     for i in range(6):
         path = a if i % 2 == 0 else b
         harness.play(path, f"T{i}")
-        harness._player.finish_loading()
+        harness.finish_loading()
         assert harness._player.state == QMediaPlayer.PlaybackState.PlayingState, i
         assert harness._player.sources[-1] == path, i
         assert "再生中" in harness._player_track_label.text, i
@@ -238,7 +257,7 @@ def test_stale_end_of_media_does_not_cancel_a_pending_load(harness, track):
 
     assert harness._pending_play_file == track
 
-    harness._player.finish_loading()
+    harness.finish_loading()
     assert harness._player.calls[-1] == "play"
 
 
@@ -267,21 +286,46 @@ def test_load_timeout_plays_when_the_media_was_already_loaded(harness, track):
     assert "再生中" in harness._player_track_label.text
 
 
-def test_playback_check_retries_a_stalled_pipeline(harness, track):
+def test_playback_check_recovers_a_stalled_pipeline_in_steps(harness, track):
+    """Stalled at 0ms: rebuild the audio sink, then reload, then report."""
     harness.play(track, "Track A")
-    harness._player.finish_loading()
+    harness.finish_loading()
     assert harness._playback_check_timer.running
 
-    harness._on_playback_check()  # position is still 0
-    harness.run_deferred()
+    harness._on_playback_check()  # 1st: rebuild the sink and play again
+    assert harness.rebuilt_audio_outputs == 1
+    assert harness._player.calls[-1] == "play"
+    assert harness._pending_play_file == ""
+    assert harness._playback_check_timer.running
 
+    harness._on_playback_check()  # 2nd: reload and play the eager way
+    harness.run_deferred()
     assert harness._load_attempt == 1
-    assert harness._pending_play_file == track
+    assert harness._eager_play
+    # eager mode plays as soon as the source is set, without waiting
+    assert harness._pending_play_file == ""
+    assert harness._player.calls[-1] == "play"
+
+    harness._on_playback_check()  # 3rd: give up and say so
+    assert "再生が始まりません" in harness._player_track_label.text
+
+
+def test_stall_recovery_restarts_for_each_new_track(harness, two_tracks):
+    a, b = two_tracks
+    harness.play(a, "A")
+    harness.finish_loading()
+    harness._on_playback_check()
+    harness._on_playback_check()
+    harness.run_deferred()
+    assert harness._stall_recoveries == 2
+
+    harness.play(b, "B")
+    assert harness._stall_recoveries == 0
 
 
 def test_playback_check_is_quiet_while_playing_normally(harness, track):
     harness.play(track, "Track A")
-    harness._player.finish_loading()
+    harness.finish_loading()
     harness._player._position = 3000
 
     harness._on_playback_check()
@@ -310,7 +354,7 @@ def test_error_during_load_does_not_cancel_the_pending_track(harness, two_tracks
 
     assert harness._pending_play_file == b
 
-    harness._player.finish_loading()
+    harness.finish_loading()
     assert harness._player.calls[-1] == "play"
 
 
@@ -321,7 +365,7 @@ def test_stop_cancels_a_pending_load(harness, track):
     assert harness._pending_play_file == ""
     assert not harness._load_timeout_timer.running
 
-    harness._player.finish_loading()  # late event from the cancelled load
+    harness.finish_loading()  # late event from the cancelled load
     assert "play" not in harness._player.calls
     assert "停止中" in harness._player_track_label.text
 

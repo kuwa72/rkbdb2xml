@@ -59,7 +59,7 @@ from PySide6.QtWidgets import (
 )
 
 try:
-    from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+    from PySide6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaPlayer
     HAS_MULTIMEDIA = True
 except ImportError:
     HAS_MULTIMEDIA = False
@@ -431,6 +431,8 @@ class MainWindow(QMainWindow):
         self._pending_play_title = ""
         self._load_generation = 0
         self._load_attempt = 0
+        self._stall_recoveries = 0
+        self._eager_play = False
         self._current_track_title = ""
         self._player_log: List[str] = []
         self._load_timeout_timer = QTimer(self)
@@ -446,8 +448,18 @@ class MainWindow(QMainWindow):
             try:
                 self._player = QMediaPlayer(self)
                 self._audio_output = QAudioOutput(self)
+                device = QMediaDevices.defaultAudioOutput()
+                if device is not None and not device.isNull():
+                    self._audio_output.setDevice(device)
                 self._player.setAudioOutput(self._audio_output)
                 self._audio_output.setVolume(0.7)
+                self._plog(
+                    "init backend=%s outputs=%s"
+                    % (
+                        os.environ.get("QT_MEDIA_BACKEND", "(default)"),
+                        [d.description() for d in QMediaDevices.audioOutputs()],
+                    )
+                )
                 self._player.positionChanged.connect(self._on_player_position_changed)
                 self._player.durationChanged.connect(self._on_player_duration_changed)
                 self._player.playbackStateChanged.connect(self._on_player_state_changed)
@@ -1163,6 +1175,8 @@ class MainWindow(QMainWindow):
         try:
             target_str = str(p)
             self._current_track_title = title
+            # A fresh user request; the stall recovery ladder starts over.
+            self._stall_recoveries = 0
             # If same track is already loaded and not stopped, just rewind and play
             if (
                 self._current_playing_file == target_str
@@ -1181,15 +1195,24 @@ class MainWindow(QMainWindow):
             self._player_track_label.setText(f"⚠️ 再生エラー: {e}")
             self._player_track_label.setStyleSheet("font-weight: bold; color: #dc2626;")
 
-    def _start_media_load(self, target_str: str, title: str, attempt: int = 0) -> None:
-        """Tear down the current media and request loading of ``target_str``."""
+    def _start_media_load(
+        self, target_str: str, title: str, attempt: int = 0, eager: bool = False
+    ) -> None:
+        """Tear down the current media and request loading of ``target_str``.
+
+        With ``eager``, play() is called right after setSource() instead of
+        waiting for LoadedMedia. That is the wrong order in theory, but it is a
+        structurally different path through the backend and is used as a
+        fallback when the correct one leaves the pipeline stalled.
+        """
         # Invalidate the previous request FIRST. stop() and setSource() emit
         # mediaStatusChanged synchronously for the media being torn down; those
         # re-entrant events must not be taken for the new track being ready.
         self._load_generation += 1
         gen = self._load_generation
         self._clear_pending_play()
-        self._plog(f"load#{gen} attempt={attempt} {Path(target_str).name}")
+        self._eager_play = eager
+        self._plog(f"load#{gen} attempt={attempt} eager={eager} {Path(target_str).name}")
 
         self._player.stop()
         self._player.setSource(QUrl())
@@ -1215,6 +1238,8 @@ class MainWindow(QMainWindow):
             return
         try:
             self._player.setSource(QUrl.fromLocalFile(self._pending_play_file))
+            if self._eager_play:
+                self._begin_playback(gen)
         except Exception as e:
             self._plog(f"setSource failed: {e!r}")
             title = self._pending_play_title
@@ -1222,8 +1247,12 @@ class MainWindow(QMainWindow):
             self._player_track_label.setText(f"⚠️ 再生エラー: {e}")
             self._player_track_label.setStyleSheet("font-weight: bold; color: #dc2626;")
 
-    def _begin_playback(self) -> None:
+    def _begin_playback(self, gen: Optional[int] = None) -> None:
         """Start playing the media that finished loading."""
+        if gen is not None and gen != self._load_generation:
+            return  # a newer request superseded this one
+        if not self._pending_play_file or not self._player:
+            return
         title = self._pending_play_title or self._current_track_title
         self._clear_pending_play()
         try:
@@ -1277,14 +1306,76 @@ class MainWindow(QMainWindow):
         pos = self._player.position()
         if state != QMediaPlayer.PlaybackState.PlayingState or pos > 0:
             return  # paused/stopped by the user, or playing normally
-        self._plog(f"playback stalled at 0ms status={_enum_name(self._player.mediaStatus())}")
-        if self._load_attempt == 0 and self._current_playing_file:
+
+        self._stall_recoveries += 1
+        self._plog(
+            f"playback stalled at 0ms status={_enum_name(self._player.mediaStatus())} "
+            f"try={self._stall_recoveries} {self._audio_diagnostics()}"
+        )
+
+        # 1st: the audio sink can come up dead without reporting an error.
+        if self._stall_recoveries == 1:
+            self._rebuild_audio_output()
+            self._player.play()
+            self._playback_check_timer.start()
+            return
+
+        # 2nd: reload and start it the other way round (play before loaded).
+        if self._stall_recoveries == 2 and self._current_playing_file:
             self._start_media_load(
-                self._current_playing_file, self._current_track_title, attempt=1
+                self._current_playing_file,
+                self._current_track_title,
+                attempt=1,
+                eager=True,
             )
             return
-        self._player_track_label.setText(f"⚠️ 再生が始まりません: {self._current_track_title}")
+
+        if not self._audio_output_available():
+            self._player_track_label.setText("⚠️ 音声出力デバイスが見つかりません")
+        else:
+            self._player_track_label.setText(f"⚠️ 再生が始まりません: {self._current_track_title}")
         self._player_track_label.setStyleSheet("font-weight: bold; color: #dc2626;")
+
+    def _audio_output_available(self) -> bool:
+        try:
+            return bool(QMediaDevices.audioOutputs())
+        except Exception:
+            return True
+
+    def _audio_diagnostics(self) -> str:
+        """One-line description of the current audio sink, for the log."""
+        try:
+            out = self._audio_output
+            if out is None:
+                return "audio_output=None"
+            device = out.device()
+            return (
+                f"device='{device.description()}' null={device.isNull()} "
+                f"vol={out.volume():.2f} muted={out.isMuted()} "
+                f"dur={self._player.duration()}"
+            )
+        except Exception as e:
+            return f"(diagnostics failed: {e!r})"
+
+    def _rebuild_audio_output(self) -> None:
+        """Replace the audio sink; a stalled one never recovers on its own."""
+        if not HAS_MULTIMEDIA or not self._player:
+            return
+        try:
+            volume = self._audio_output.volume() if self._audio_output else 0.7
+            new_output = QAudioOutput(self)
+            device = QMediaDevices.defaultAudioOutput()
+            if device is not None and not device.isNull():
+                new_output.setDevice(device)
+            new_output.setVolume(volume)
+            old_output = self._audio_output
+            self._audio_output = new_output
+            self._player.setAudioOutput(new_output)
+            if old_output is not None:
+                old_output.deleteLater()
+            self._plog(f"audio output rebuilt: {self._audio_diagnostics()}")
+        except Exception as e:
+            self._plog(f"audio output rebuild failed: {e!r}")
 
     def _on_player_media_status_changed(self, status: Any) -> None:
         """Start deferred playback once loaded, and handle end of media."""
@@ -1297,7 +1388,12 @@ class MainWindow(QMainWindow):
             QMediaPlayer.MediaStatus.BufferedMedia,
         ):
             if self._pending_play_file:
-                self._begin_playback()
+                # play() must NOT be called re-entrantly from inside Qt's own
+                # status signal: the FFmpeg backend accepts it and reports
+                # Buffering/Buffered, but the clock never starts and position
+                # stays at 0. Start it from a clean event loop turn instead.
+                gen = self._load_generation
+                QTimer.singleShot(0, lambda: self._begin_playback(gen))
             return
 
         if status == QMediaPlayer.MediaStatus.InvalidMedia:
