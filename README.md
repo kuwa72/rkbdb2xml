@@ -39,160 +39,75 @@ Rekordbox のプレイリストや楽曲データを、XMLエクスポートお�
 
 ## Overview
 
+rkbdb2xml は Rekordbox のデータベースから、Rekordbox 標準のエクスポートと同じ形式の XML を書き出します。あわせて楽曲ファイルを出力先にコピーし、タグをローマ字化したり BPM を付けたりできます。
 
-rkbdb2xml allows you to create XML exports from your Rekordbox database in the same format as the native Rekordbox XML export feature. This can be useful for:
+用途:
 
-- Backing up your collection in a portable format
-- Analyzing your music library using other tools
-- Batch processing your tracks and playlists
-- Integrating with other software that supports Rekordbox XML format
-- Creating custom DJ tools that interact with Rekordbox data
+- コレクションを可搬な形式でバックアップする
+- CDJ など、日本語表示に対応しない機器向けに曲名をローマ字化して持ち出す
+- 曲名の先頭に BPM を付けて機器側でソートしやすくする
+- Rekordbox XML を読める他のソフトと連携する
 
 ## Features
 
-- Modern CLI interface (export, list-playlists, version)
-- Auto-detection of Rekordbox database path
-- Export complete track metadata in Rekordbox XML format
-- Support for nested playlist folders
-- Optional romaji conversion (--roman) and BPM prefix (--bpm)
-- Order tracks by default or BPM (--orderby bpm)
-- Copy audio files to output directory, updating metadata tags
-- Overwrite output with --force flag and verbose logging with --verbose
-
-## Installation
-
-### Using pip (recommended)
-
-```bash
-python -m venv .venv
-.venv\Scripts\activate  # On Windows
-pip install rkbdb2xml
-```
-
-### Development Installation
-
-```bash
-git clone https://github.com/kuwa72/rkbdb2xml.git
-cd rkbdb2xml
-python -m venv .venv
-.venv\Scripts\activate  # On Windows
-pip install -r requirements.txt
-pip install -e .
-```
-
-## Usage
-
-The command-line interface provides easy access to all functionality:
-
-### Basic Commands
-
-```bash
-# Auto-detect Rekordbox database and export to XML
-rkbdb2xml export -o rekordbox_export.xml
-
-# Specify a custom database path
-rkbdb2xml export /path/to/rekordbox.db -o rekordbox_export.xml
-
-# Show detailed progress with verbose flag
-rkbdb2xml export -o rekordbox_export.xml --verbose
-
-# Overwrite existing output file with force flag
-rkbdb2xml export -o rekordbox_export.xml --force
-
-# Show version information
-rkbdb2xml version
-```
-
-### Command Help
-
-```bash
-# General help
-rkbdb2xml --help
-
-# Specific command help
-rkbdb2xml export --help
-```
-
-## Python API Usage
-
-You can use rkbdb2xml as a library in your Python code:
-
-```python
-from rkbdb2xml.rkbdb2xml import export_rekordbox_db_to_xml
-
-# Auto-detect and export to XML
-export_rekordbox_db_to_xml(None, "output.xml", verbose=True)
-
-# Specify a custom database path
-export_rekordbox_db_to_xml("/path/to/rekordbox.db", "output.xml")
-```
-
-```python
-from rkbdb2xml.rkbdb2xml import RekordboxXMLExporter
-
-# Create exporter with verbose output
-exporter = RekordboxXMLExporter(None, None, use_verbose=True)
-exporter.generate_xml("output.xml")
-exporter.close()
-```
+- プレイリストのツリー表示とチェックによる選択（親フォルダのチェックで配下も選択）
+- 出力前後の曲名・ローマ字変換・BPM 付与・ファイル存在状態のリアルタイムプレビュー
+- 選択中の合計曲数・総容量・USB メモリ使用率の自動計算
+- ミニ楽曲プレイヤーによる試聴（シークバー・音量・出力デバイス選択）
+- ローマ字変換 / BPM 付加 / 曲の並び順をプレイリスト単位または一括で設定
+- 楽曲ファイルを出力先にコピーし、タグを変換して書き込み
+- Rekordbox データベースパスの自動検出
 
 ## Requirements
 
+GUI バイナリを使う場合、インストールは不要です。ソースから動かす場合:
+
 - Python 3.8+
-- pyrekordbox>=0.4.0
-- lxml
-- typer
-- rich
-- mutagen
-- psutil
+- pyrekordbox>=0.4.0 / PySide6 / lxml / mutagen / romann / psutil
 
 ## Development
 
 ```bash
-# Clone repository and setup development environment
 git clone https://github.com/kuwa72/rkbdb2xml.git
 cd rkbdb2xml
-python -m venv .venv
-.venv\Scripts\activate  # On Windows
-pip install -r requirements.txt
-pip install -e .
-
-# Run tests
-pytest tests/
-
-# Run with coverage
-pytest --cov=rkbdb2xml
-
-# Lint and type-check
-flake8
-mypy .
+scripts/setup_env.sh          # .venv 作成 + 依存インストール
+scripts/test.sh               # 構文チェック + テスト
 ```
 
-### Building GUI Binaries
+GUI をソースから起動する場合:
 
-You can compile a standalone single-file GUI executable locally using PyInstaller:
+```bash
+.venv/bin/python run_gui.py
+```
 
-1. Install PyInstaller in your virtual environment:
-   ```bash
-   pip install pyinstaller
-   ```
-2. Run PyInstaller to build the executable:
-   - **Windows:**
-     ```bash
-     pyinstaller --clean --onefile --noconsole --name rkbdb2xml-gui run_gui.py
-     ```
-   - **macOS / Linux:**
-     ```bash
-     pyinstaller --clean --onefile --noconsole --name rkbdb2xml-gui run_gui.py
-     ```
-   The built binary will be generated in the `dist/` directory.
+### Python API
 
-### GitHub Releases (Multi-platform)
+エクスポート処理はライブラリとしても呼び出せます:
 
-The project includes a GitHub Actions workflow that automatically builds and packages the GUI executable for Windows, macOS, and Linux when you push a version tag (e.g. `v1.0.0`):
-1. Tag your commit: `git tag v1.0.0`
-2. Push the tag: `git push origin v1.0.0`
-The workflow will compile the binaries on all three operating systems and attach them as release assets.
+```python
+from rkbdb2xml.rkbdb2xml import export_rekordbox_db_to_xml
+
+# データベースを自動検出して XML を書き出す
+export_rekordbox_db_to_xml(None, "output.xml", verbose=True)
+```
+
+### ローカルビルド
+
+```bash
+scripts/build_local.sh        # dist/ に単一実行ファイルを生成
+```
+
+`rkbdb2xml-gui-console.spec` はコンソール付きのビルド定義です。プレイヤーの診断ログなど、標準出力を見たいときに使います。
+
+### リリース
+
+バージョンタグを push すると、GitHub Actions が Windows / macOS / Linux のバイナリをビルドして Release に添付します。
+
+```bash
+scripts/release.sh 0.6.1 "fix: 何を直したか"
+```
+
+バグ修正はパッチバージョン（3桁目）を上げます。
 
 ## Contributing
 
