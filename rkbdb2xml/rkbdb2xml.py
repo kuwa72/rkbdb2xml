@@ -16,7 +16,9 @@ import pyrekordbox
 from pyrekordbox.rbxml import RekordboxXml
 from pyrekordbox.db6 import Rekordbox6Database as RekordboxDatabase, DjmdPlaylist
 from pyrekordbox.config import get_config, KeyExtractor, get_pioneer_install_dir
-from lxml import etree
+# pyrekordbox.rbxml writes the XML with the stdlib parser; use the same one here
+# so the file is only ever handled by one implementation.
+import xml.etree.ElementTree as ET
 import psutil
 import shutil
 
@@ -637,11 +639,7 @@ class RekordboxXMLExporter:
         """
         Update Location attributes in XML to URIs of copied files.
         """
-        from lxml import etree
-        import urllib.parse as up
-        import os
-
-        tree = etree.parse(xml_path)
+        tree = ET.parse(xml_path)
         for track in tree.findall(".//TRACK"):
             loc = track.attrib.get("Location")
             if not loc:
@@ -650,8 +648,8 @@ class RekordboxXMLExporter:
             # Look up in copy_map using various key representations
             dest = self._copy_map.get(loc)
             if not dest and "://" in loc:
-                parsed = up.urlparse(loc)
-                raw = up.unquote(parsed.path)
+                parsed = urllib.parse.urlparse(loc)
+                raw = urllib.parse.unquote(parsed.path)
                 dest = self._copy_map.get(raw)
                 if not dest and os.name == "nt" and raw.startswith("/"):
                     dest = self._copy_map.get(raw.lstrip("/"))
@@ -664,10 +662,10 @@ class RekordboxXMLExporter:
 
             if dest:
                 uri = dest.resolve().as_uri()
-                parsed_uri = up.urlparse(uri)
+                parsed_uri = urllib.parse.urlparse(uri)
                 if parsed_uri.scheme == "file" and not parsed_uri.netloc:
                     parsed_uri = parsed_uri._replace(netloc="localhost")
-                    uri = up.urlunparse(parsed_uri)
+                    uri = urllib.parse.urlunparse(parsed_uri)
                 track.attrib["Location"] = uri
 
         tree.write(xml_path, encoding="UTF-8", xml_declaration=True)
