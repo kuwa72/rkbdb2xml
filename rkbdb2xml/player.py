@@ -35,6 +35,8 @@ except ImportError:  # pragma: no cover - depends on the PySide6 build
 LOAD_TIMEOUT_MS = 5000
 # How long after play() to record whether the position actually advanced
 PLAYBACK_PROBE_MS = 1500
+# How long to let a playing audio stream close before opening the next one
+TEARDOWN_GRACE_MS = 150
 # Ring buffer size for the diagnostics log
 LOG_MAX_LINES = 300
 
@@ -71,6 +73,7 @@ class PreviewPlayer(QObject):
         self._generation = 0
         self._loaded_path = ""
         self._loaded_title = ""
+        self._restarted = False
 
         self._player: Optional[Any] = None
         self._audio_output: Optional[Any] = None
@@ -231,16 +234,24 @@ class PreviewPlayer(QObject):
         self._probe_timer.stop()
         self.log(
             f"load#{gen} {Path(target).name} "
-            f"(previous pos={self._player.position()})"
+            f"(previous pos={self._player.position()} "
+            f"state={_enum_name(self._player.playbackState())})"
         )
 
+        # Replacing media that is actively playing is the case that fails on
+        # Windows: the new source loads and buffers, but the clock never
+        # starts. The audio stream is closed on a backend worker thread, and
+        # one event loop turn is not enough for it to finish -- the failing
+        # logs show the new source being set 7ms after the stop. Media that
+        # was not playing needs no wait.
+        was_playing = self._player.playbackState() != QMediaPlayer.PlaybackState.StoppedState
         self._player.stop()
 
         self._request = _Request(target, title, gen)
         self._loaded_path = target
         self._loaded_title = title
-        # Set the source from a clean event loop turn, outside the teardown.
-        QTimer.singleShot(0, lambda: self._apply_source(gen))
+        delay = TEARDOWN_GRACE_MS if was_playing else 0
+        QTimer.singleShot(delay, lambda: self._apply_source(gen))
 
         self.event.emit(LOADING, title)
         self._load_timer.start()
@@ -263,43 +274,40 @@ class PreviewPlayer(QObject):
             return
         self._request = None
         self._load_timer.stop()
-        self._rearm_audio_output()
+        self._restarted = False
+        # The one start that is known to work on Windows seeks first, so do the
+        # same here. On freshly loaded media this is a no-op semantically.
+        self._player.setPosition(0)
         self._player.play()
         self.event.emit(PLAYING, request.title)
         self._probe_timer.start()
 
-    def _rearm_audio_output(self) -> None:
-        """Re-attach the audio sink before starting playback.
-
-        Tearing down media that was actually playing can leave the FFmpeg
-        backend's renderer detached from the sink: the next play() reports
-        PlayingState and the media reaches BufferedMedia, but the clock never
-        starts and the position stays at 0. Detaching and re-attaching the
-        same QAudioOutput re-arms the renderer. The object is reused on
-        purpose -- building a new sink for every track is what left playback
-        silent in 0.5.7.
-        """
-        if self._audio_output is None:
-            return
-        try:
-            self._player.setAudioOutput(None)
-            self._player.setAudioOutput(self._audio_output)
-        except Exception as e:  # pragma: no cover - backend specific
-            self.log(f"re-arming the audio output failed: {e!r}")
-
     def _on_playback_probe(self) -> None:
-        """Log whether playback actually started. Diagnostics only."""
+        """Check that playback actually started, and restart it once if not.
+
+        The restart is the same thing that works by hand: double-clicking the
+        stalled track again seeks to 0 and plays the media that is already
+        loaded, without touching the source. It is done at most once per
+        track, so a track that genuinely cannot play reports rather than loops.
+        """
         if not self._player or self._request is not None:
             return
-        state = _enum_name(self._player.playbackState())
+        state = self._player.playbackState()
         position = self._player.position()
-        detail = ""
-        if position == 0:
-            detail = f" {self._audio_diagnostics()}"
+        stalled = state == QMediaPlayer.PlaybackState.PlayingState and position == 0
+        detail = f" {self._audio_diagnostics()}" if stalled else ""
         self.log(
-            f"probe state={state} pos={position} dur={self._player.duration()}"
+            f"probe state={_enum_name(state)} pos={position}"
+            f" dur={self._player.duration()}"
             f" status={_enum_name(self._player.mediaStatus())}{detail}"
         )
+        if not stalled or self._restarted:
+            return
+        self._restarted = True
+        self.log("probe -> restarting the stalled pipeline")
+        self._player.setPosition(0)
+        self._player.play()
+        self._probe_timer.start()
 
     def _audio_diagnostics(self) -> str:
         """One-line description of the audio sink, for the log."""

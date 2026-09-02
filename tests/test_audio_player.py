@@ -139,13 +139,19 @@ class FakeBackedPlayer(PreviewPlayer):
 @pytest.fixture()
 def preview(monkeypatch):
     deferred = []
-    monkeypatch.setattr(
-        player_mod.QTimer, "singleShot", staticmethod(lambda ms, cb: deferred.append(cb))
-    )
+    delays = []
+
+    def capture(ms, cb):
+        delays.append(ms)
+        deferred.append(cb)
+
+    monkeypatch.setattr(player_mod.QTimer, "singleShot", staticmethod(capture))
     p = FakeBackedPlayer()
     p.deferred = deferred
+    p.delays = delays
     p._load_timer = FakeTimer()
     p._probe_timer = FakeTimer()
+    p._restarted = False
     p.events = []
     p.event.connect(lambda kind, detail: p.events.append((kind, detail)))
     return p
@@ -317,43 +323,95 @@ def test_toggle_is_ignored_while_loading(preview, track):
     assert "pause" not in preview._player.calls
 
 
-def test_the_audio_sink_is_re_armed_before_playing(preview, track):
-    """Tearing down playing media can leave the renderer detached.
-
-    play() then reports PlayingState and the media reaches BufferedMedia while
-    the position stays at 0, so the sink is detached and re-attached first --
-    reusing the same object, never building a new one.
-    """
+def test_playback_starts_from_the_beginning(preview, track):
+    """The one start known to work on Windows seeks before playing."""
     preview.start_track(track, "Track A")
+    preview._player._position = 999
     preview.finish_loading()
 
-    tail = preview._player.calls[-3:]
-    assert tail == ["setAudioOutput(None)", "setAudioOutput(sink)", "play"]
+    assert preview._player.position() == 0
+    assert preview._player.calls[-1] == "play"
 
 
-def test_the_probe_records_a_stalled_pipeline_without_acting(preview, track):
+def test_replacing_a_playing_track_waits_for_the_stream_to_close(preview, two_tracks):
+    """The failing case on Windows: the old stream had not finished closing.
+
+    The new source used to be set one event loop turn (7ms in the logs) after
+    stopping a playing track, and the clock then never started.
+    """
+    a, b = two_tracks
+    preview.start_track(a, "A")
+    preview.finish_loading()
+    assert preview.is_playing()
+    preview.delays.clear()
+
+    preview.play_file(b, "B")
+
+    assert preview.delays == [player_mod.TEARDOWN_GRACE_MS]
+
+
+def test_starting_from_idle_does_not_wait(preview, track):
+    preview.delays.clear()
+
+    preview.play_file(track, "Track A")
+
+    assert preview.delays == [0], "nothing was playing, so there is nothing to close"
+
+
+def test_a_stalled_pipeline_is_restarted_once(preview, track):
+    """Restarting is exactly what works by hand: seek to 0 and play again."""
     preview.start_track(track, "Track A")
     preview.finish_loading()
     assert preview._probe_timer.running
 
-    calls_before = list(preview._player.calls)
     preview._on_playback_probe()  # position is still 0
 
-    assert preview._player.calls == calls_before, "the probe must not act"
-    assert "probe state=" in preview.log_text()
-    assert "pos=0" in preview.log_text()
+    assert preview._player.calls[-1] == "play"
+    assert "restarting" in preview.log_text()
     assert "device='fake'" in preview.log_text()
+    assert preview._probe_timer.running, "the restart is checked in turn"
+
+    calls_before = list(preview._player.calls)
+    preview._on_playback_probe()  # still stalled
+
+    assert preview._player.calls == calls_before, "only one restart per track"
 
 
-def test_the_probe_is_quiet_about_the_sink_when_playing_normally(preview, track):
+def test_the_restart_budget_is_per_track(preview, two_tracks):
+    a, b = two_tracks
+    preview.start_track(a, "A")
+    preview.finish_loading()
+    preview._on_playback_probe()
+    assert preview._restarted
+
+    preview.start_track(b, "B")
+    preview.finish_loading()
+
+    assert not preview._restarted, "a new track gets its own restart"
+
+
+def test_a_paused_track_is_not_restarted(preview, track):
     preview.start_track(track, "Track A")
     preview.finish_loading()
-    preview._player._position = 3000
+    preview.toggle()  # paused at 0
+    calls_before = list(preview._player.calls)
 
     preview._on_playback_probe()
 
+    assert preview._player.calls == calls_before
+
+
+def test_a_playing_track_is_left_alone(preview, track):
+    preview.start_track(track, "Track A")
+    preview.finish_loading()
+    preview._player._position = 3000
+    calls_before = list(preview._player.calls)
+
+    preview._on_playback_probe()
+
+    assert preview._player.calls == calls_before
     assert "pos=3000" in preview.log_text()
-    assert "device=" not in preview.log_text().split("probe")[-1]
+    assert "restarting" not in preview.log_text()
 
 
 def test_missing_file_is_reported_without_touching_the_player(preview, tmp_path):
