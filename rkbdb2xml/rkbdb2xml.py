@@ -4,7 +4,7 @@ Main functionality for converting Rekordbox DB to XML.
 
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Union, Tuple, Any
+from typing import Any, Dict, List, Optional
 import urllib.parse
 import urllib.request
 import hashlib
@@ -12,9 +12,8 @@ import mutagen
 from mutagen.id3 import ID3, TIT2, TPE1, TALB
 from mutagen.mp4 import MP4
 
-import pyrekordbox
 from pyrekordbox.rbxml import RekordboxXml
-from pyrekordbox.db6 import Rekordbox6Database as RekordboxDatabase, DjmdPlaylist
+from pyrekordbox.db6 import Rekordbox6Database as RekordboxDatabase
 from pyrekordbox.config import get_config, KeyExtractor, get_pioneer_install_dir
 # pyrekordbox.rbxml writes the XML with the stdlib parser; use the same one here
 # so the file is only ever handled by one implementation.
@@ -33,6 +32,24 @@ except Exception:
         def to_roman(self, text: str) -> str:
             return text
 
+
+
+def playlist_tracks(db, playlist, orderby: str = "default") -> List[Any]:
+    """Return the tracks of a playlist, optionally ordered by BPM.
+
+    ``Rekordbox6Database.get_playlist_contents()`` always yields ``DjmdContent``
+    rows (never ``DjmdSongPlaylist``), so callers can rely on ``track.ID`` --
+    a string in Rekordbox 6 -- instead of probing for other attributes.
+
+    Args:
+        db: An open ``Rekordbox6Database``
+        playlist: A ``DjmdPlaylist`` or a playlist ID. Must not be a folder.
+        orderby: ``"bpm"`` to sort by BPM, anything else keeps playlist order
+    """
+    entries = db.get_playlist_contents(playlist).all()
+    if orderby == "bpm":
+        entries = sorted(entries, key=lambda entry: entry.BPM or 0)
+    return entries
 
 
 class RekordboxXMLExporter:
@@ -70,7 +87,7 @@ class RekordboxXMLExporter:
         self._playlist_options = playlist_options or {}
         # Per-track options resolved during playlist processing
         # track_id -> {roman, bpm}
-        self._track_options: Dict[Any, Dict[str, Any]] = {}
+        self._track_options: Dict[str, Dict[str, Any]] = {}
         self._roman_converter = None
         needs_roman = use_roman or any(
             opts.get("roman", False) for opts in self._playlist_options.values()
@@ -142,7 +159,7 @@ class RekordboxXMLExporter:
             path: Path where the XML file should be saved
         """
         xml = RekordboxXml()
-        self._selected_track_ids = set()
+        self._selected_track_ids: set = set()
         self._add_playlists(xml)
         self._add_tracks_to_collection(xml)
         self.verbose(f"Saving XML to {path}")
@@ -278,7 +295,7 @@ class RekordboxXMLExporter:
 
         # If playlists specified, limit to selected tracks
         if getattr(self, '_playlist_specs', None):
-            tracks = [track for track in tracks if track.ID in self._selected_track_ids]
+            tracks = [track for track in tracks if str(track.ID) in self._selected_track_ids]
 
         # Add each track to the collection
         for track in tracks:
@@ -324,7 +341,7 @@ class RekordboxXMLExporter:
             track: Track data from the database (DjmdContent object)
         """
         # Resolve per-track options (set during playlist processing)
-        track_opts = self._track_options.get(track.ID, {})
+        track_opts = self._track_options.get(str(track.ID), {})
         use_roman = track_opts.get("roman", self._use_roman)
         use_bpm = track_opts.get("bpm", self._use_bpm)
 
@@ -487,38 +504,11 @@ class RekordboxXMLExporter:
         use_roman = pl_opts.get("roman", self._use_roman)
         use_bpm = pl_opts.get("bpm", self._use_bpm)
 
-        # Get tracks in playlist
-        playlist_entries = self.db.get_playlist_contents(playlist).all()
-
-        # orderby=bpm オプション対応
-        if orderby == 'bpm':
-            def safe_bpm(entry):
-                bpm = getattr(entry, 'BPM', None)
-                if not bpm:
-                    return 0
-                return bpm
-            playlist_entries = sorted(playlist_entries, key=safe_bpm)
-
-        # Normalize playlist entries and record per-track options
-        for entry in playlist_entries:
-            # entry can be DjmdContent or DjmdSongPlaylist
-            track_id = getattr(entry, 'ContentID', None) or getattr(entry, 'ID', None)
-            if track_id is None:
-                continue
-
+        # Track IDs are kept as strings everywhere so lookups need no coercion.
+        for entry in playlist_tracks(self.db, playlist, orderby):
+            track_id = str(entry.ID)
             playlist_node.add_track(track_id)
-
-            # Record track ID in all possible types for robust lookup
             self._selected_track_ids.add(track_id)
-            self._selected_track_ids.add(str(track_id))
-            try:
-                self._selected_track_ids.add(int(track_id))
-            except Exception:
-                pass
-
-            if getattr(entry, 'ID', None) is not None:
-                self._selected_track_ids.add(entry.ID)
-                self._selected_track_ids.add(str(entry.ID))
 
             # Store per-track options (first playlist's settings win)
             if track_id not in self._track_options:
@@ -543,13 +533,10 @@ class RekordboxXMLExporter:
         failed = 0
 
         for content in self.db.get_content().all():
-            cid = getattr(content, 'ID', None)
+            cid = str(content.ID)
             # If specific playlists selected, filter by selected tracks
             if getattr(self, '_playlist_specs', None):
-                if (
-                    cid not in self._selected_track_ids
-                    and str(cid) not in self._selected_track_ids
-                ):
+                if cid not in self._selected_track_ids:
                     continue
 
             loc = getattr(content, 'FolderPath', None)

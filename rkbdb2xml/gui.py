@@ -62,7 +62,7 @@ from pyrekordbox.db6 import Rekordbox6Database as RekordboxDatabase
 
 from . import __version__, player
 from .player import PreviewPlayer
-from .rkbdb2xml import export_rekordbox_db_to_xml
+from .rkbdb2xml import export_rekordbox_db_to_xml, playlist_tracks
 
 # ---------------------------------------------------------------------------
 # Constants & Defaults
@@ -268,11 +268,8 @@ class SizeCalculatorWorker(QObject):
             for pl in target_pls:
                 if self._is_cancelled:
                     return
-                entries = db.get_playlist_contents(pl).all()
-                for entry in entries:
-                    cid = getattr(entry, "ContentID", None) or getattr(entry, "ID", None)
-                    if cid is not None:
-                        unique_track_ids.add(str(cid))
+                for entry in playlist_tracks(db, pl):
+                    unique_track_ids.add(str(entry.ID))
 
             # Query track sizes
             from .rkbdb2xml import RekordboxXMLExporter
@@ -960,21 +957,12 @@ class MainWindow(QMainWindow):
         # Query tracks from Rekordbox DB
         try:
             db = RekordboxDatabase()
-            pl_obj = None
-            for p in db.get_playlist().all():
-                if p.ID == pl_id:
-                    pl_obj = p
-                    break
-            if not pl_obj:
+            pl_obj = db.get_playlist(ID=pl_id)
+            if pl_obj is None:
                 self._preview_header.setText(f"🎵 プレイリスト: {path_str} (0 曲)")
                 return
 
-            entries = db.get_playlist_contents(pl_obj).all()
-            if orderby == "bpm":
-                def safe_bpm(entry):
-                    b = getattr(entry, "BPM", None)
-                    return b if b else 0
-                entries = sorted(entries, key=safe_bpm)
+            entries = playlist_tracks(db, pl_obj, orderby)
 
             self._preview_header.setText(
                 f"🎵 プレイリスト: {path_str} (全 {len(entries)} 曲)  "
