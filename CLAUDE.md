@@ -29,13 +29,23 @@ Rekordbox のプレイリストを XML エクスポートし、楽曲ファイ�
 
 ## QMediaPlayer の落とし穴（再発させないこと）
 
-`PreviewPlayer` の設計はすべてこの3点に由来する。触るときは `tests/test_audio_player.py` を先に読むこと。
+`PreviewPlayer` の設計はすべてこの4点に由来する。触るときは `tests/test_audio_player.py` を先に読むこと。どれも Windows でしか出ず、Linux では再現しない。
 
 1. `setSource()` は非同期。直後に `play()` を呼ぶとローダと競合し、再生状態を示すのに音が進まない。`LoadedMedia` を待つ。
 2. `stop()` と `setSource()` は、**破棄される前のメディア**の `mediaStatusChanged` を同期的に再発火する。保留中の要求はティアダウンの**前**に無効化する。
 3. `play()` を `mediaStatusChanged` スロットの中から再入的に呼ぶと、バックエンドは受理して Buffering→Buffered まで進むのにクロックが動かない。`QTimer.singleShot(0, ...)` でシグナルスタックの外から呼ぶ。
+4. **再生中**のメディアを破棄した直後に新しいソースを設定すると、ロードもバッファリングも成功するのに position が 0 のまま動かない。WASAPI が古いストリームを閉じ切る前に次を開くため。直前が再生中だったときだけ `TEARDOWN_GRACE_MS` 待ってから `setSource()` する。停止状態からなら待たない。
 
-`QAudioOutput` は起動時の1個を使い回す。作り直すと position だけ進んで無音になる。
+`QAudioOutput` は起動時の1個を使い回す。作り直すと position だけ進んで無音になる。`setAudioOutput()` で付け直すのは効果がない（0.6.1 で試して削除済み）。
+
+### 症状の切り分け方
+
+「再生されない」には2種類あり、対処がまったく違う。まず `PreviewPlayer` の probe ログ（`probe state=... pos=...`）を見ること。
+
+- `pos=0` のまま → パイプラインが始動していない。上の 1〜4 の領域。
+- `pos` は進むが無音 → 音声シンク側。出力デバイス（🔈 コンボボックス）を疑う。
+
+この区別をつけずに直そうとすると、効かない修正を積み上げることになる。
 
 ## スコープ
 
