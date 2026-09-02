@@ -33,6 +33,8 @@ except ImportError:  # pragma: no cover - depends on the PySide6 build
 
 # How long to wait for a source to load before reporting failure
 LOAD_TIMEOUT_MS = 5000
+# How long after play() to record whether the position actually advanced
+PLAYBACK_PROBE_MS = 1500
 # Ring buffer size for the diagnostics log
 LOG_MAX_LINES = 300
 
@@ -77,6 +79,11 @@ class PreviewPlayer(QObject):
         self._load_timer.setSingleShot(True)
         self._load_timer.setInterval(LOAD_TIMEOUT_MS)
         self._load_timer.timeout.connect(self._on_load_timeout)
+        # Records whether playback really started; it never acts on the result.
+        self._probe_timer = QTimer(self)
+        self._probe_timer.setSingleShot(True)
+        self._probe_timer.setInterval(PLAYBACK_PROBE_MS)
+        self._probe_timer.timeout.connect(self._on_playback_probe)
 
         if not HAS_MULTIMEDIA:
             self.log("QtMultimedia unavailable")
@@ -192,6 +199,7 @@ class PreviewPlayer(QObject):
         self._generation += 1  # cancel anything in flight
         self._request = None
         self._load_timer.stop()
+        self._probe_timer.stop()
         if self._player:
             self._player.stop()
         self.event.emit(STOPPED, "")
@@ -220,7 +228,11 @@ class PreviewPlayer(QObject):
         gen = self._generation
         self._request = None
         self._load_timer.stop()
-        self.log(f"load#{gen} {Path(target).name}")
+        self._probe_timer.stop()
+        self.log(
+            f"load#{gen} {Path(target).name} "
+            f"(previous pos={self._player.position()})"
+        )
 
         self._player.stop()
 
@@ -251,8 +263,57 @@ class PreviewPlayer(QObject):
             return
         self._request = None
         self._load_timer.stop()
+        self._rearm_audio_output()
         self._player.play()
         self.event.emit(PLAYING, request.title)
+        self._probe_timer.start()
+
+    def _rearm_audio_output(self) -> None:
+        """Re-attach the audio sink before starting playback.
+
+        Tearing down media that was actually playing can leave the FFmpeg
+        backend's renderer detached from the sink: the next play() reports
+        PlayingState and the media reaches BufferedMedia, but the clock never
+        starts and the position stays at 0. Detaching and re-attaching the
+        same QAudioOutput re-arms the renderer. The object is reused on
+        purpose -- building a new sink for every track is what left playback
+        silent in 0.5.7.
+        """
+        if self._audio_output is None:
+            return
+        try:
+            self._player.setAudioOutput(None)
+            self._player.setAudioOutput(self._audio_output)
+        except Exception as e:  # pragma: no cover - backend specific
+            self.log(f"re-arming the audio output failed: {e!r}")
+
+    def _on_playback_probe(self) -> None:
+        """Log whether playback actually started. Diagnostics only."""
+        if not self._player or self._request is not None:
+            return
+        state = _enum_name(self._player.playbackState())
+        position = self._player.position()
+        detail = ""
+        if position == 0:
+            detail = f" {self._audio_diagnostics()}"
+        self.log(
+            f"probe state={state} pos={position} dur={self._player.duration()}"
+            f" status={_enum_name(self._player.mediaStatus())}{detail}"
+        )
+
+    def _audio_diagnostics(self) -> str:
+        """One-line description of the audio sink, for the log."""
+        try:
+            out = self._audio_output
+            if out is None:
+                return "audio_output=None"
+            device = out.device()
+            return (
+                f"device='{device.description()}' null={device.isNull()} "
+                f"vol={out.volume():.2f} muted={out.isMuted()}"
+            )
+        except Exception as e:
+            return f"(diagnostics failed: {e!r})"
 
     def _on_load_timeout(self) -> None:
         request = self._request

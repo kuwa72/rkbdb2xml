@@ -64,6 +64,9 @@ class FakeMediaPlayer:
     def mediaStatus(self):
         return self.status
 
+    def setAudioOutput(self, output):
+        self.calls.append(f"setAudioOutput({'None' if output is None else 'sink'})")
+
     def setPosition(self, pos):
         self._position = pos
 
@@ -72,6 +75,16 @@ class FakeMediaPlayer:
 
     def duration(self):
         return 180000
+
+
+class FakeAudioOutput:
+    """Stands in for QAudioOutput; identity is what the re-arm relies on."""
+
+    def volume(self):
+        return 0.7
+
+    def isMuted(self):
+        return False
 
 
 class FakeTimer:
@@ -96,7 +109,10 @@ class FakeBackedPlayer(PreviewPlayer):
 
     def _create_backend(self):
         self._player = FakeMediaPlayer(self)
-        self._audio_output = None
+        self._audio_output = FakeAudioOutput()
+
+    def _audio_diagnostics(self):
+        return "device='fake'"
 
     def current_device_name(self):
         return "fake device"
@@ -129,6 +145,7 @@ def preview(monkeypatch):
     p = FakeBackedPlayer()
     p.deferred = deferred
     p._load_timer = FakeTimer()
+    p._probe_timer = FakeTimer()
     p.events = []
     p.event.connect(lambda kind, detail: p.events.append((kind, detail)))
     return p
@@ -298,6 +315,45 @@ def test_toggle_is_ignored_while_loading(preview, track):
 
     assert "play" not in preview._player.calls
     assert "pause" not in preview._player.calls
+
+
+def test_the_audio_sink_is_re_armed_before_playing(preview, track):
+    """Tearing down playing media can leave the renderer detached.
+
+    play() then reports PlayingState and the media reaches BufferedMedia while
+    the position stays at 0, so the sink is detached and re-attached first --
+    reusing the same object, never building a new one.
+    """
+    preview.start_track(track, "Track A")
+    preview.finish_loading()
+
+    tail = preview._player.calls[-3:]
+    assert tail == ["setAudioOutput(None)", "setAudioOutput(sink)", "play"]
+
+
+def test_the_probe_records_a_stalled_pipeline_without_acting(preview, track):
+    preview.start_track(track, "Track A")
+    preview.finish_loading()
+    assert preview._probe_timer.running
+
+    calls_before = list(preview._player.calls)
+    preview._on_playback_probe()  # position is still 0
+
+    assert preview._player.calls == calls_before, "the probe must not act"
+    assert "probe state=" in preview.log_text()
+    assert "pos=0" in preview.log_text()
+    assert "device='fake'" in preview.log_text()
+
+
+def test_the_probe_is_quiet_about_the_sink_when_playing_normally(preview, track):
+    preview.start_track(track, "Track A")
+    preview.finish_loading()
+    preview._player._position = 3000
+
+    preview._on_playback_probe()
+
+    assert "pos=3000" in preview.log_text()
+    assert "device=" not in preview.log_text().split("probe")[-1]
 
 
 def test_missing_file_is_reported_without_touching_the_player(preview, tmp_path):
