@@ -5,11 +5,13 @@ Provides a tree-based playlist viewer with per-playlist export options,
 output folder selection, and background export execution.
 """
 
+import io
 import json
 import platform
 import subprocess
 import sys
 import threading
+import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -117,7 +119,8 @@ class ExportWorker(QObject):
     """Runs export_rekordbox_db_to_xml in a background thread."""
 
     progress = Signal(str)   # log messages
-    finished = Signal()
+    succeeded = Signal()     # export completed without error
+    finished = Signal()      # always emitted, success or failure
     error = Signal(str)
 
     def __init__(
@@ -135,18 +138,22 @@ class ExportWorker(QObject):
 
     @Slot()
     def run(self) -> None:
-        import io
-        import sys
+        """Run the export. Always reports either an error or completion.
 
+        Nothing may escape this slot: an exception propagating back into Qt's
+        signal dispatch leaves the thread half torn down, so the window never
+        learns the export ended and simply stops responding.
+        """
+        capture = io.StringIO()
         try:
             self.progress.emit(f"エクスポート開始: {self._output_path}")
 
-            # Redirect stdout to capture verbose output and avoid
-            # cp932 encoding errors on Windows.
+            # The exporter reports progress on stdout. sys.stdout is
+            # process-global, so this also swallows anything the rest of the
+            # app prints while the export runs -- and it keeps the exporter's
+            # non-ASCII output away from the cp932 console on Windows.
             old_stdout = sys.stdout
-            capture = io.StringIO()
             sys.stdout = capture
-
             try:
                 export_rekordbox_db_to_xml(
                     self._db_path,
@@ -161,17 +168,44 @@ class ExportWorker(QObject):
                 )
             finally:
                 sys.stdout = old_stdout
-
-            # Emit captured output (last 50 lines to avoid flooding)
-            output = capture.getvalue()
-            if output:
-                lines = output.strip().splitlines()
-                for line in lines[-50:]:
-                    self.progress.emit(line)
-
+        except Exception as e:
+            self._emit_captured(capture)
+            self.progress.emit(traceback.format_exc())
+            self.error.emit(f"{type(e).__name__}: {e}")
+        except BaseException as e:  # noqa: BLE001 - must not escape the slot
+            self.error.emit(f"{type(e).__name__}: {e}")
+        else:
+            self._emit_captured(capture)
+            self.succeeded.emit()
         finally:
             self.finished.emit()
 
+    def _emit_captured(self, capture: "io.StringIO") -> None:
+        """Forward the exporter's captured output (last 50 lines)."""
+        try:
+            output = capture.getvalue()
+        except Exception:
+            return
+        if output:
+            for line in output.strip().splitlines()[-50:]:
+                self.progress.emit(line)
+
+
+
+def close_database(db: Any) -> None:
+    """Close a Rekordbox database connection, ignoring failures.
+
+    Every connection holds file handles on the SQLCipher database. The size
+    calculation and the track preview each open one every time the selection
+    changes, so leaving them open piles up connections for as long as the
+    window is open.
+    """
+    if db is None:
+        return
+    try:
+        db.close()
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -219,10 +253,25 @@ class SizeCalculatorWorker(QObject):
 
     @Slot()
     def run(self) -> None:
+        """Compute the totals.
+
+        ``finished`` must be emitted on every path: the QThread is quit by that
+        signal, so returning without it leaves the thread -- and the Rekordbox
+        database connection it holds -- alive for the rest of the session.
+        """
+        try:
+            self._run()
+        except Exception:
+            self.finished.emit(0, 0, 0, 0, 0)
+        except BaseException:  # noqa: BLE001 - must not escape the slot
+            self.finished.emit(0, 0, 0, 0, 0)
+
+    def _run(self) -> None:
         if not self._selected_paths or self._is_cancelled:
             self.finished.emit(0, 0, 0, 0, 0)
             return
 
+        db = None
         try:
             db = RekordboxDatabase(self._db_path)
             all_pls = db.get_playlist().all()
@@ -267,6 +316,7 @@ class SizeCalculatorWorker(QObject):
             unique_track_ids = set()
             for pl in target_pls:
                 if self._is_cancelled:
+                    self.finished.emit(0, 0, 0, 0, 0)
                     return
                 for entry in playlist_tracks(db, pl):
                     unique_track_ids.add(str(entry.ID))
@@ -285,6 +335,7 @@ class SizeCalculatorWorker(QObject):
 
             for cid in unique_track_ids:
                 if self._is_cancelled:
+                    self.finished.emit(0, 0, 0, 0, 0)
                     return
                 content = content_map.get(cid)
                 if not content:
@@ -360,14 +411,17 @@ class SizeCalculatorWorker(QObject):
 
             total_bytes = max(0, total_bytes)
 
-            if not self._is_cancelled:
+            if self._is_cancelled:
+                self.finished.emit(0, 0, 0, 0, 0)
+            else:
                 self.finished.emit(
                     len(target_pls), len(unique_track_ids), total_bytes, exact_count, estimated_count
                 )
 
         except Exception:
-            if not self._is_cancelled:
-                self.finished.emit(0, 0, 0, 0, 0)
+            self.finished.emit(0, 0, 0, 0, 0)
+        finally:
+            close_database(db)
 
 
 
@@ -392,6 +446,7 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(get_app_icon())
 
         self._export_thread: Optional[QThread] = None
+        self._export_succeeded = False
         self._is_updating_checks = False
         self._current_preview_item: Optional[QStandardItem] = None
 
@@ -743,10 +798,12 @@ class MainWindow(QMainWindow):
         self._model.clear()
         self._model.setHorizontalHeaderLabels(["プレイリスト", "ローマ字変換", "BPM付加", "曲の並び順"])
 
+        db = None
         try:
             db = RekordboxDatabase()
             pls = db.get_playlist().all()
         except Exception as e:
+            close_database(db)
             msg = (
                 f"Rekordbox データベースの読み込みに失敗しました。\n\n"
                 f"【詳細】: {e}\n\n"
@@ -837,6 +894,9 @@ class MainWindow(QMainWindow):
         root = self._model.invisibleRootItem()
         for rp in root_parents:
             build_tree(root, rp, "")
+
+        # The tree holds plain strings now, so the connection can go.
+        close_database(db)
 
         self._model.blockSignals(False)
 
@@ -955,6 +1015,7 @@ class MainWindow(QMainWindow):
         orderby = SORT_MAP.get(sort_text, "bpm")
 
         # Query tracks from Rekordbox DB
+        db = None
         try:
             db = RekordboxDatabase()
             pl_obj = db.get_playlist(ID=pl_id)
@@ -1045,6 +1106,8 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             self._preview_header.setText(f"🎵 プレイリスト: {path_str} (読み込みエラー: {e})")
+        finally:
+            close_database(db)
 
     # ----- Audio preview player -----
 
@@ -1257,11 +1320,23 @@ class MainWindow(QMainWindow):
 
     def _start_async_size_calculation(self) -> None:
         """Start background worker to compute size of selected playlists."""
-        if self._calc_worker:
-            self._calc_worker.cancel()
-        if self._calc_thread and self._calc_thread.isRunning():
-            self._calc_thread.quit()
-            self._calc_thread.wait(100)
+        # Both objects are deleteLater()'d when their thread finishes, so the
+        # Python wrappers can outlive the C++ objects. Touching one then raises
+        # RuntimeError, which would escape this slot and leave the summary
+        # label stuck on "計算中...".
+        try:
+            if self._calc_worker is not None:
+                self._calc_worker.cancel()
+        except RuntimeError:
+            pass
+        self._calc_worker = None
+        try:
+            if self._calc_thread is not None and self._calc_thread.isRunning():
+                self._calc_thread.quit()
+                self._calc_thread.wait(100)
+        except RuntimeError:
+            pass
+        self._calc_thread = None
 
         selected_paths: List[str] = []
         root = self._model.invisibleRootItem()
@@ -1279,11 +1354,18 @@ class MainWindow(QMainWindow):
         worker.finished.connect(self._on_size_calculated)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._on_calc_thread_finished)
         thread.finished.connect(thread.deleteLater)
 
         self._calc_worker = worker
         self._calc_thread = thread
         thread.start()
+
+    @Slot()
+    def _on_calc_thread_finished(self) -> None:
+        """Forget the finished worker before Qt deletes it."""
+        self._calc_worker = None
+        self._calc_thread = None
 
     @Slot(int, int, int, int, int)
     def _on_size_calculated(
@@ -1508,13 +1590,17 @@ class MainWindow(QMainWindow):
         thread = QThread()
         worker.moveToThread(thread)
 
+        self._export_succeeded = False
         thread.started.connect(worker.run)
         worker.progress.connect(self._log_message)
+        worker.succeeded.connect(self._on_export_succeeded)
         worker.error.connect(self._on_export_error)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
+        # _on_export_done opens a modal dialog, which runs a nested event loop;
+        # let it run before the thread object is scheduled for deletion.
         thread.finished.connect(self._on_export_done)
+        thread.finished.connect(thread.deleteLater)
 
         self._export_thread = thread
         self._export_worker = worker
@@ -1539,8 +1625,13 @@ class MainWindow(QMainWindow):
                     self._collect_selected(item, result)
 
 
+    @Slot()
+    def _on_export_succeeded(self) -> None:
+        self._export_succeeded = True
+
     @Slot(str)
     def _on_export_error(self, msg: str) -> None:
+        self._export_succeeded = False
         self._log_message(f"エラー: {msg}")
         err_dialog = QMessageBox(self)
         err_dialog.setIcon(QMessageBox.Critical)
@@ -1559,6 +1650,9 @@ class MainWindow(QMainWindow):
         self._export_btn.setEnabled(True)
         self._progress.setVisible(False)
         self._export_thread = None
+
+        if not getattr(self, "_export_succeeded", False):
+            return  # _on_export_error already told the user what went wrong
 
         export_dir = getattr(self, "_current_export_dir", None)
         if export_dir and export_dir.exists():

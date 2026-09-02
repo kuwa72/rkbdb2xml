@@ -317,11 +317,17 @@ class PreviewPlayer(QObject):
     # ----- diagnostics -----
 
     def log(self, message: str) -> None:
+        """Record a player event for the diagnostics dialog.
+
+        Deliberately does not print: sys.stdout is process-global and the
+        export worker redirects it into a StringIO while it runs, so printing
+        from the GUI thread would write into that buffer concurrently. The
+        events are read back through the diagnostics dialog instead.
+        """
         line = f"{datetime.now().strftime('%H:%M:%S.%f')[:-3]} {message}"
         self._log.append(line)
         if len(self._log) > LOG_MAX_LINES:
             del self._log[:-LOG_MAX_LINES]
-        print("[player]", line)
 
     def log_text(self) -> str:
         header = (
