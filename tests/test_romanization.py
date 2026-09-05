@@ -15,8 +15,13 @@ def test_romanization_of_track_attributes():
     with tempfile.NamedTemporaryFile(suffix='.xml', delete=False) as tmp:
         temp_path = tmp.name
     try:
-        # roman=Trueでエクスポート
-        export_rekordbox_db_to_xml(TEST_DB_PATH, temp_path, roman=True)
+        # roman=Trueをプレイリストオプションに指定してエクスポート
+        export_rekordbox_db_to_xml(
+            TEST_DB_PATH,
+            temp_path,
+            playlists=["xxx"],
+            playlist_options={"xxx": {"roman": True, "bpm": False, "orderby": "default"}},
+        )
         tree = ET.parse(temp_path)
         root = tree.getroot()
         collection = root.find('COLLECTION')

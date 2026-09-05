@@ -52,9 +52,6 @@ def make_exporter(**overrides):
     exporter = RekordboxXMLExporter.__new__(RekordboxXMLExporter)
     exporter._playlist_path_map = {}
     exporter._playlist_options = {}
-    exporter._orderby = "default"
-    exporter._use_roman = False
-    exporter._use_bpm = False
     exporter._selected_track_ids = set()
     exporter._track_options = {}
     for key, value in overrides.items():
@@ -133,7 +130,7 @@ def test_integer_ids_are_normalised_to_strings():
     assert node.tracks == ["101"]
 
 
-def test_per_playlist_options_win_over_the_global_ones():
+def test_per_playlist_options_are_applied():
     exporter = make_exporter(
         _playlist_path_map={"PL1": "Folder/List"},
         _playlist_options={"Folder/List": {"roman": True, "bpm": True, "orderby": "bpm"}},

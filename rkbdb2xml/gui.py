@@ -160,9 +160,6 @@ class ExportWorker(QObject):
                     self._output_path,
                     db_key=None,
                     verbose=True,
-                    roman=False,
-                    bpm=False,
-                    orderby="default",
                     playlists=self._playlists,
                     playlist_options=self._playlist_options,
                 )
