@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rkbdb2xml"
-version = "0.8.0"
+version = "0.8.1"
 description = "Rekordbox のプレイリストを XML エクスポート・楽曲変換する GUI ツール"
 readme = "README.md"
 authors = [

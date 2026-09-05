@@ -900,6 +900,16 @@ class MainWindow(QMainWindow):
 
         self._model.blockSignals(False)
 
+        # Refresh folder states after unblocking so the view receives data changes.
+        self._is_updating_checks = True
+        try:
+            for row in range(root.rowCount()):
+                item = root.child(row, COL_CHECK)
+                if item and item.hasChildren():
+                    self._update_parent_check_state(item)
+        finally:
+            self._is_updating_checks = False
+
         self._tree.collapseAll()
 
         # Set sort combo delegates after tree is built
