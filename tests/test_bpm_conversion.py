@@ -90,7 +90,12 @@ def test_bpm_option_adds_bpm_to_title():
     with tempfile.NamedTemporaryFile(suffix='.xml', delete=False) as tmp:
         temp_path = tmp.name
     try:
-        export_rekordbox_db_to_xml(TEST_DB_PATH, temp_path, bpm=True)
+        export_rekordbox_db_to_xml(
+            TEST_DB_PATH,
+            temp_path,
+            playlists=["xxx"],
+            playlist_options={"xxx": {"roman": False, "bpm": True, "orderby": "default"}},
+        )
         tree = ET.parse(temp_path)
         root = tree.getroot()
         collection = root.find('COLLECTION')

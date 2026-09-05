@@ -14,7 +14,12 @@ def test_playlist_order_by_bpm():
     with tempfile.NamedTemporaryFile(suffix='.xml', delete=False) as tmp:
         temp_path = tmp.name
     try:
-        export_rekordbox_db_to_xml(TEST_DB_PATH, temp_path, orderby="bpm")
+        export_rekordbox_db_to_xml(
+            TEST_DB_PATH,
+            temp_path,
+            playlists=["xxx"],
+            playlist_options={"xxx": {"roman": False, "bpm": False, "orderby": "bpm"}},
+        )
         tree = ET.parse(temp_path)
         root = tree.getroot()
         playlists = root.find('PLAYLISTS')
