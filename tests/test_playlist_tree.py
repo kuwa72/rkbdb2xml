@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtGui import QStandardItem, QStandardItemModel  # noqa: E402
 
 from rkbdb2xml import gui  # noqa: E402
-from rkbdb2xml.gui import ROLE_IS_FOLDER  # noqa: E402
+from rkbdb2xml.gui import ROLE_IS_FOLDER, ROLE_PATH  # noqa: E402
 
 
 def make_folder_with_children(*states):
@@ -65,6 +65,9 @@ def add_row(parent, name, is_folder, checked=True):
     item.setCheckable(True)
     item.setData(is_folder, ROLE_IS_FOLDER)
     item.setCheckState(Qt.Checked if checked else Qt.Unchecked)
+    parent_path = parent.data(ROLE_PATH) if isinstance(parent, QStandardItem) else ""
+    path = f"{parent_path}/{name}" if parent_path else name
+    item.setData(path, ROLE_PATH)
     parent.appendRow(item)
     return item
 
@@ -129,6 +132,24 @@ def test_rapid_toggle_leaves_consistent_state():
 
     assert leaf.checkState() == Qt.Checked
     assert folder.checkState() == Qt.Checked
+
+
+def test_collect_selected_skips_partially_checked_folders():
+    """Partially checked folders must not drag in unchecked siblings (issue #6)."""
+    window, model = make_connected_window()
+    folder = add_row(model, "Folder", True)
+    child_a = add_row(folder, "A", False, checked=False)
+    add_row(folder, "B", False, checked=False)
+    child_a.setCheckState(Qt.Checked)
+    # The model cascade leaves the folder partially checked.
+    assert folder.checkState() == Qt.PartiallyChecked
+
+    selected = []
+    window._collect_selected(model.invisibleRootItem(), selected)
+
+    assert selected == ["Folder/A"]
+    assert "Folder" not in selected
+    assert "Folder/B" not in selected
 
 
 class FakeCalcThread:

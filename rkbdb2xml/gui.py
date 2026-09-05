@@ -1629,7 +1629,7 @@ class MainWindow(QMainWindow):
         thread.start()
 
     def _collect_selected(self, parent: QStandardItem, result: List[str]) -> None:
-        """Collect path strings of checked and partially checked items."""
+        """Collect path strings of checked items (partial folders are skipped)."""
         for row in range(parent.rowCount()):
             item = parent.child(row, COL_CHECK)
             if not item:
@@ -1637,14 +1637,10 @@ class MainWindow(QMainWindow):
             path_str = item.data(ROLE_PATH)
             state = item.checkState()
 
-            if state in (Qt.Checked, Qt.PartiallyChecked):
-                if path_str and path_str not in result:
-                    result.append(path_str)
-                if item.hasChildren():
-                    self._collect_selected(item, result)
-            else:
-                if item.hasChildren():
-                    self._collect_selected(item, result)
+            if state == Qt.Checked and path_str and path_str not in result:
+                result.append(path_str)
+            if item.hasChildren():
+                self._collect_selected(item, result)
 
 
     @Slot()
