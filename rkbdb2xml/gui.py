@@ -1340,10 +1340,14 @@ class MainWindow(QMainWindow):
         except RuntimeError:
             pass
         self._calc_worker = None
+        # Destroying a still-running QThread aborts the process
+        # ("QThread: Destroyed while thread is still running"). Wait for the
+        # previous thread to actually stop before dropping the reference.
         try:
-            if self._calc_thread is not None and self._calc_thread.isRunning():
-                self._calc_thread.quit()
-                self._calc_thread.wait(100)
+            if self._calc_thread is not None:
+                if self._calc_thread.isRunning():
+                    self._calc_thread.quit()
+                self._calc_thread.wait()
         except RuntimeError:
             pass
         self._calc_thread = None
@@ -1472,6 +1476,9 @@ class MainWindow(QMainWindow):
             parent = item.parent()
             if parent:
                 self._update_parent_check_state(parent)
+        except Exception:
+            _log_crash_exception("_on_item_changed")
+            raise
         finally:
             self._is_updating_checks = False
 
@@ -1482,43 +1489,51 @@ class MainWindow(QMainWindow):
     def _set_children_check(self, parent: QStandardItem, state: Qt.CheckState) -> None:
         """Recursively set check state on all descendant items."""
         target_state = Qt.Checked if state == Qt.Checked else Qt.Unchecked
-        for row in range(parent.rowCount()):
-            child = parent.child(row, COL_CHECK)
-            if child:
-                child.setCheckState(target_state)
-                if child.hasChildren():
-                    self._set_children_check(child, target_state)
+        try:
+            for row in range(parent.rowCount()):
+                child = parent.child(row, COL_CHECK)
+                if child:
+                    child.setCheckState(target_state)
+                    if child.hasChildren():
+                        self._set_children_check(child, target_state)
+        except Exception:
+            _log_crash_exception("_set_children_check")
+            raise
 
     def _update_parent_check_state(self, parent: QStandardItem) -> None:
         """Update parent item checkState based on its children states."""
         if not parent:
             return
-        checked_count = 0
-        total_count = 0
-        has_partial = False
+        try:
+            checked_count = 0
+            total_count = 0
+            has_partial = False
 
-        for row in range(parent.rowCount()):
-            child = parent.child(row, COL_CHECK)
-            if child:
-                total_count += 1
-                c_state = child.checkState()
-                if c_state == Qt.Checked:
-                    checked_count += 1
-                elif c_state == Qt.PartiallyChecked:
-                    has_partial = True
+            for row in range(parent.rowCount()):
+                child = parent.child(row, COL_CHECK)
+                if child:
+                    total_count += 1
+                    c_state = child.checkState()
+                    if c_state == Qt.Checked:
+                        checked_count += 1
+                    elif c_state == Qt.PartiallyChecked:
+                        has_partial = True
 
-        if total_count > 0:
-            if checked_count == total_count:
-                parent.setCheckState(Qt.Checked)
-            elif checked_count == 0 and not has_partial:
-                parent.setCheckState(Qt.Unchecked)
-            else:
-                parent.setCheckState(Qt.PartiallyChecked)
+            if total_count > 0:
+                if checked_count == total_count:
+                    parent.setCheckState(Qt.Checked)
+                elif checked_count == 0 and not has_partial:
+                    parent.setCheckState(Qt.Unchecked)
+                else:
+                    parent.setCheckState(Qt.PartiallyChecked)
 
-        # Recurse upwards to grandparents
-        grand_parent = parent.parent()
-        if grand_parent:
-            self._update_parent_check_state(grand_parent)
+            # Recurse upwards to grandparents
+            grand_parent = parent.parent()
+            if grand_parent:
+                self._update_parent_check_state(grand_parent)
+        except Exception:
+            _log_crash_exception("_update_parent_check_state")
+            raise
 
     # ----- Output folder -----
 
@@ -1773,7 +1788,65 @@ class MainWindow(QMainWindow):
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+CRASH_LOG_FILE = Path.home() / ".rkbdb2xml_crash.log"
+
+
+def _log_crash_exception(context: str) -> None:
+    """Append the current exception (with context label) to the crash log."""
+    try:
+        with CRASH_LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(f"=== EXCEPTION IN {context} ===\n")
+            traceback.print_exc(file=f)
+    except Exception:
+        pass
+
+
+def _install_crash_hooks() -> None:
+    """Record *any* process exit path so silent crashes are not lost.
+
+    A console=False PyInstaller build has no stderr, and a slot that swallows an
+    exception can end the process without any WER report or crash dump. Both a
+    native segfault (faulthandler) and an uncaught Python exception (excepthook)
+    write a traceback here, so the *next* reproduction shows exactly what died.
+    """
+    try:
+        import faulthandler
+
+        with CRASH_LOG_FILE.open("a", encoding="utf-8") as f:
+            f.write(f"\n=== rkbdb2xml {__version__} started {__import__('datetime').datetime.now()} ===\n")
+        # faulthandler appends to the file on SIGSEGV/SIGABRT (native crashes).
+        faulthandler.enable(file=CRASH_LOG_FILE.open("a", encoding="utf-8"))
+    except Exception:
+        pass
+
+    def excepthook(exc_type, exc_value, exc_tb) -> None:
+        try:
+            with CRASH_LOG_FILE.open("a", encoding="utf-8") as f:
+                f.write(f"=== UNCAUGHT EXCEPTION {exc_type.__name__} ===\n")
+                traceback.print_exception(exc_type, exc_value, exc_tb, file=f)
+        except Exception:
+            pass
+        # Still surface on stderr for a console run.
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    def unraisablehook(unraisable) -> None:
+        # Catches exceptions in QThread workers / destructors that bypass
+        # sys.excepthook (e.g. SizeCalculatorWorker / ExportWorker threads).
+        try:
+            with CRASH_LOG_FILE.open("a", encoding="utf-8") as f:
+                f.write(f"=== UNRAISABLE {unraisable.exc_type.__name__} ===\n")
+                traceback.print_exception(
+                    unraisable.exc_type, unraisable.exc_value, unraisable.exc_traceback, file=f
+                )
+        except Exception:
+            pass
+
+    sys.excepthook = excepthook
+    sys.unraisablehook = unraisablehook
+
+
 def main() -> None:
+    _install_crash_hooks()
     app = QApplication(sys.argv)
     app.setWindowIcon(get_app_icon())
     window = MainWindow()

@@ -129,3 +129,46 @@ def test_rapid_toggle_leaves_consistent_state():
 
     assert leaf.checkState() == Qt.Checked
     assert folder.checkState() == Qt.Checked
+
+
+class FakeCalcThread:
+    """QThread stand-in that would crash if destroyed while 'running'."""
+
+    def __init__(self, running=True):
+        self._running = running
+        self.quit_called = False
+        self.wait_calls = []
+
+    def isRunning(self):
+        return self._running
+
+    def quit(self):
+        self.quit_called = True
+        self._running = False
+
+    def wait(self, ms=None):
+        self.wait_calls.append(ms)
+        return not self._running
+
+
+def test_start_async_waits_for_previous_thread(monkeypatch):
+    """Regression: destroying a running QThread aborts the process.
+
+    The old code did ``quit(); wait(100)`` then dropped the reference, so a
+    thread that didn't finish within 100 ms was destroyed while running
+    (QThread: Destroyed while thread is still running). The fix waits for the
+    previous thread to actually stop before reassigning _calc_thread.
+    """
+    window, model = make_connected_window()
+    window._calc_worker = None
+    window._calc_thread = FakeCalcThread(running=True)
+    prev_thread = window._calc_thread
+    window._collect_selected = lambda *a, **kw: []
+    window._on_size_calculated = lambda *a, **kw: None
+
+    window._start_async_size_calculation()
+
+    assert prev_thread.quit_called
+    # The fix must wait without a timeout so it never destroys a live thread.
+    assert prev_thread.wait_calls == [None]
+    assert window._calc_thread is None
