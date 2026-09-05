@@ -49,4 +49,8 @@ out/
 test_output.txt
 debug_out.xml
 out.xml
-testout.xml
+testout.xml
+
+# Agent / graph cache
+.serena/
+graphify-out/
