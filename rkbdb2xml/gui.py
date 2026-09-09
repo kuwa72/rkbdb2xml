@@ -36,6 +36,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -64,7 +65,11 @@ from pyrekordbox.db6 import Rekordbox6Database as RekordboxDatabase
 
 from . import __version__, player
 from .player import PreviewPlayer
-from .rkbdb2xml import export_rekordbox_db_to_xml, playlist_tracks
+from .rkbdb2xml import (
+    export_rekordbox_db_to_device,
+    export_rekordbox_db_to_xml,
+    playlist_tracks,
+)
 
 # ---------------------------------------------------------------------------
 # Constants & Defaults
@@ -116,7 +121,7 @@ ROLE_TRACK_TITLE = Qt.UserRole + 5  # track title string
 # Export worker
 # ---------------------------------------------------------------------------
 class ExportWorker(QObject):
-    """Runs export_rekordbox_db_to_xml in a background thread."""
+    """Runs export_rekordbox_db_to_* in a background thread."""
 
     progress = Signal(str)   # log messages
     succeeded = Signal()     # export completed without error
@@ -129,12 +134,14 @@ class ExportWorker(QObject):
         output_path: str,
         playlists: Optional[List[str]],
         playlist_options: Optional[Dict[str, dict]] = None,
+        device_export: bool = False,
     ):
         super().__init__()
         self._db_path = db_path
         self._output_path = output_path
         self._playlists = playlists
         self._playlist_options = playlist_options or {}
+        self._device_export = device_export
 
     @Slot()
     def run(self) -> None:
@@ -155,14 +162,24 @@ class ExportWorker(QObject):
             old_stdout = sys.stdout
             sys.stdout = capture
             try:
-                export_rekordbox_db_to_xml(
-                    self._db_path,
-                    self._output_path,
-                    db_key=None,
-                    verbose=True,
-                    playlists=self._playlists,
-                    playlist_options=self._playlist_options,
-                )
+                if getattr(self, "_device_export", False):
+                    export_rekordbox_db_to_device(
+                        self._db_path,
+                        self._output_path,
+                        db_key=None,
+                        verbose=True,
+                        playlists=self._playlists,
+                        playlist_options=self._playlist_options,
+                    )
+                else:
+                    export_rekordbox_db_to_xml(
+                        self._db_path,
+                        self._output_path,
+                        db_key=None,
+                        verbose=True,
+                        playlists=self._playlists,
+                        playlist_options=self._playlist_options,
+                    )
             finally:
                 sys.stdout = old_stdout
         except Exception as e:
@@ -515,6 +532,16 @@ class MainWindow(QMainWindow):
         out_row.addWidget(open_folder_btn)
 
         layout.addLayout(out_row)
+
+        # --- Device export option ---
+        self._device_export_check = QCheckBox(
+            "デバイスライブラリ形式で書き出す（USB 直下に export.pdb を生成）"
+        )
+        self._device_export_check.setToolTip(
+            "チェックすると XML 形式ではなく、CDJ-350/850/900/2000 シリーズ用の "
+            "デバイスライブラリ（PIONEER/rekordbox/export.pdb）を直接 USB へ書き出します。"
+        )
+        layout.addWidget(self._device_export_check)
 
         # --- Toolbar row (Quick actions) ---
         toolbar_row = QHBoxLayout()
@@ -918,6 +945,10 @@ class MainWindow(QMainWindow):
             self._output_edit.setText(saved_output)
         else:
             self._output_edit.setText(str(get_default_output_dir()))
+
+        self._device_export_check.setChecked(
+            saved.get("device_export", False)
+        )
 
         count = self._count_playlists(root)
         self._log_message(f"{count} 個のプレイリストを読み込みました")
@@ -1574,7 +1605,11 @@ class MainWindow(QMainWindow):
                 )
                 return
 
-        xml_path = str(output_dir / "rekordbox.xml")
+        device_export = self._device_export_check.isChecked()
+        if device_export:
+            out_path = output_path
+        else:
+            out_path = str(output_dir / "rekordbox.xml")
 
         # Collect selected playlists
         selected_paths: List[str] = []
@@ -1605,9 +1640,10 @@ class MainWindow(QMainWindow):
         # Create worker with per-playlist options
         worker = ExportWorker(
             db_path=None,
-            output_path=xml_path,
+            output_path=out_path,
             playlists=selected_paths,
             playlist_options=pl_options,
+            device_export=device_export,
         )
         thread = QThread()
         worker.moveToThread(thread)
@@ -1720,6 +1756,7 @@ class MainWindow(QMainWindow):
             "selected_playlists": selected,
             "playlist_options": options,
             "audio_output_device": self._device_combo.currentText(),
+            "device_export": self._device_export_check.isChecked(),
         }
         try:
             with SETTINGS_FILE.open("w", encoding="utf-8") as f:

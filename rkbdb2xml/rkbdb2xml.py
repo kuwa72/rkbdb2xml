@@ -172,6 +172,44 @@ class RekordboxXMLExporter:
         # Update XML Location attributes to point to copied files
         self._update_locations(path, export_dir)
 
+    def generate_device_export(self, usb_root: str) -> None:
+        """
+        Generate a CDJ-compatible USB device library directly under ``usb_root``.
+
+        Creates ``PIONEER/rekordbox/export.pdb`` and ``Contents/`` with
+        copied audio files and re-used ANLZ analysis data.
+
+        Args:
+            usb_root: Path to the USB drive root directory.
+        """
+        from .pdb_export import DevicePdbXml, PdbExporter
+
+        usb_root_path = Path(usb_root)
+        (usb_root_path / "PIONEER" / "rekordbox").mkdir(
+            parents=True, exist_ok=True
+        )
+        (usb_root_path / "Contents").mkdir(parents=True, exist_ok=True)
+
+        xml = DevicePdbXml()
+        self._selected_track_ids: set = set()
+        self._copy_map: Dict[str, Path] = {}
+        self._add_playlists(xml)
+
+        if not self._selected_track_ids:
+            self.verbose("デバイス書き出し: 選択されたトラックがありません")
+            return
+
+        self._copy_files(usb_root_path / "Contents")
+
+        content_map = {str(c.ID): c for c in self.db.get_content().all()}
+        PdbExporter(self.db, verbose=self._verbose).build(
+            usb_root=usb_root_path,
+            playlist_tree=xml._root_node.children,
+            content_map=content_map,
+            copy_map=self._copy_map,
+            track_options=self._track_options,
+        )
+
     def _build_path_map(self, all_playlists) -> Dict[Any, str]:
         """Build hierarchical path map (ID -> 'Folder/Subfolder/Playlist') matching GUI."""
         id_map = {pl.ID: pl for pl in all_playlists}
@@ -676,5 +714,38 @@ def export_rekordbox_db_to_xml(
     )
     try:
         exporter.generate_xml(output_path)
+    finally:
+        exporter.close()
+
+
+def export_rekordbox_db_to_device(
+    db_path: Optional[str],
+    output_path: str,
+    db_key: Optional[str] = None,
+    verbose: bool = False,
+    playlists: Optional[List[str]] = None,
+    playlist_options: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> None:
+    """
+    Export a Rekordbox database to a CDJ-compatible USB device library.
+
+    Args:
+        db_path: Path to the Rekordbox database file, or None to auto-detect
+        output_path: USB drive root path (e.g. ``/media/user/USB``)
+        db_key: Rekordbox database key (optional)
+        verbose: Show detailed output during export
+        playlists: Selected playlist paths (hierarchical path strings)
+        playlist_options: Per-playlist options dict mapping playlist path
+            to {"roman": bool, "bpm": bool, "orderby": str}.
+    """
+    exporter = RekordboxXMLExporter(
+        db_path,
+        db_key=db_key,
+        use_verbose=verbose,
+        playlists=playlists,
+        playlist_options=playlist_options,
+    )
+    try:
+        exporter.generate_device_export(output_path)
     finally:
         exporter.close()

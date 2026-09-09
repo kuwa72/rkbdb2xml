@@ -13,6 +13,7 @@ packages_to_collect = [
     'sudachidict_full',
     'sudachidict_core',
     'pyrekordbox',
+    'rekordbox_pdb',
     'mutagen',
     'PySide6.QtMultimedia',
 ]

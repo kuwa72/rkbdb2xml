@@ -62,8 +62,8 @@ rkbdb2xml は Rekordbox のデータベースから、Rekordbox 標準のエク�
 
 GUI バイナリを使う場合、インストールは不要です。ソースから動かす場合:
 
-- Python 3.8+
-- pyrekordbox>=0.4.0 / PySide6 / mutagen / romann / psutil
+- Python 3.10+
+- pyrekordbox>=0.4.0 / PySide6 / mutagen / romann / psutil / rekordbox-pdb
 
 ## Development
 
