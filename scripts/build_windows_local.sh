@@ -70,14 +70,14 @@ fi
 
 if [ -z "${VENV_PREFIX_WIN}" ]; then
     echo "=== Creating Windows venv ==="
-    "${WINPY}" -m venv "${WIN_VENV_DIR}"
-    # Resolve any junction/symlink to the actual Store-Python redirected path.
-    if [ -e "${VENV_PY_WSL}" ]; then
-        VENV_PY_WSL_RESOLVED="$(readlink -f "${VENV_PY_WSL}" 2>/dev/null || true)"
-        if [ -n "${VENV_PY_WSL_RESOLVED}" ] && [ -f "${VENV_PY_WSL_RESOLVED}" ]; then
-            VENV_PY_WSL="${VENV_PY_WSL_RESOLVED}"
-        fi
+    VENV_OUT_WSL="$(mktemp)"
+    "${WINPY}" -m venv --clear "${WIN_VENV_DIR}" 2>"${VENV_OUT_WSL}"
+    # Microsoft Store Python prints the actual redirected path to stderr.
+    ACTUAL_LOCATION_WIN="$(sed -n 's/.*Actual location:[[:space:]]*"\([^"]*\)".*/\1/p' "${VENV_OUT_WSL}" | head -n 1 | tr -d '\r')"
+    if [ -n "${ACTUAL_LOCATION_WIN}" ]; then
+        VENV_PY_WSL="$(wslpath -u "${ACTUAL_LOCATION_WIN}" 2>/dev/null)"
     fi
+    rm -f "${VENV_OUT_WSL}"
     if ! VENV_PREFIX_WIN="$(resolve_venv_prefix "${VENV_PY_WSL}")"; then
         VENV_PREFIX_WIN=""
     fi
@@ -125,8 +125,8 @@ EOF
 REQ_HASH="$(sha256sum "${VENV_REQ_WSL}" | cut -d' ' -f1)"
 if [ ! -f "${VENV_MARKER_WSL}" ] || [ "$(cat "${VENV_MARKER_WSL}")" != "${REQ_HASH}" ]; then
     echo "=== Installing/updating runtime deps in Windows venv ==="
-    "${VENV_PY_WIN}" -m pip install --upgrade pip
-    "${VENV_PY_WIN}" -m pip install -r "${VENV_REQ_WIN}"
+    "${VENV_PY_WSL}" -m pip install --upgrade pip
+    "${VENV_PY_WSL}" -m pip install -r "${VENV_REQ_WIN}"
     echo "${REQ_HASH}" > "${VENV_MARKER_WSL}"
 else
     echo "=== Windows venv deps are up to date (hash ${REQ_HASH:0:16}...) ==="
@@ -140,7 +140,8 @@ if [ "${BUILD_CLEAN:-0}" = "1" ]; then
 fi
 
 echo "=== Building Windows exe with PyInstaller ==="
-"${VENV_PY_WIN}" -m PyInstaller ${CLEAN_FLAG} --noconfirm rkbdb2xml-gui.spec
+SPEC_WIN="$(wslpath -w rkbdb2xml-gui.spec)"
+"${VENV_PY_WSL}" -m PyInstaller ${CLEAN_FLAG} --noconfirm "${SPEC_WIN}"
 
 echo "=== Verifying dist/rkbdb2xml-gui.exe ==="
 python3 - dist/rkbdb2xml-gui.exe <<'PY'
