@@ -71,6 +71,13 @@ fi
 if [ -z "${VENV_PREFIX_WIN}" ]; then
     echo "=== Creating Windows venv ==="
     "${WINPY}" -m venv "${WIN_VENV_DIR}"
+    # Resolve any junction/symlink to the actual Store-Python redirected path.
+    if [ -e "${VENV_PY_WSL}" ]; then
+        VENV_PY_WSL_RESOLVED="$(readlink -f "${VENV_PY_WSL}" 2>/dev/null || true)"
+        if [ -n "${VENV_PY_WSL_RESOLVED}" ] && [ -x "${VENV_PY_WSL_RESOLVED}" ]; then
+            VENV_PY_WSL="${VENV_PY_WSL_RESOLVED}"
+        fi
+    fi
     if ! VENV_PREFIX_WIN="$(resolve_venv_prefix "${VENV_PY_WSL}")"; then
         VENV_PREFIX_WIN=""
     fi
