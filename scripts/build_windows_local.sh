@@ -56,13 +56,24 @@ resolve_venv_prefix() {
     "${pywin}" -c "import sys; print(sys.prefix)" 2>/dev/null | tr -d '\r'
 }
 
-VENV_PY_WIN="$(printf '%s\\Scripts\\python.exe' "${WIN_VENV_DIR}")"
-VENV_PREFIX_WIN="$(resolve_venv_prefix "${VENV_PY_WIN}")"
+# Use the WSL-mount path to invoke the venv Python; Windows-style paths like
+# C:\... are not valid command names from inside WSL.
+VENV_PY_WSL="$(wslpath -u "$(printf '%s\\Scripts\\python.exe' "${WIN_VENV_DIR}")" 2>/dev/null)"
+if [ -z "${VENV_PY_WSL}" ]; then
+    echo "ERROR: wslpath failed for ${WIN_VENV_DIR}\\Scripts\\python.exe" >&2
+    exit 1
+fi
+
+if ! VENV_PREFIX_WIN="$(resolve_venv_prefix "${VENV_PY_WSL}")"; then
+    VENV_PREFIX_WIN=""
+fi
 
 if [ -z "${VENV_PREFIX_WIN}" ]; then
     echo "=== Creating Windows venv ==="
     "${WINPY}" -m venv "${WIN_VENV_DIR}"
-    VENV_PREFIX_WIN="$(resolve_venv_prefix "${VENV_PY_WIN}")"
+    if ! VENV_PREFIX_WIN="$(resolve_venv_prefix "${VENV_PY_WSL}")"; then
+        VENV_PREFIX_WIN=""
+    fi
 fi
 
 if [ -z "${VENV_PREFIX_WIN}" ]; then
@@ -71,7 +82,9 @@ if [ -z "${VENV_PREFIX_WIN}" ]; then
 fi
 
 # Refresh executable path and WSL paths from the resolved prefix/executable.
-VENV_PY_WIN="$("${VENV_PY_WIN}" -c "import sys; print(sys.executable)" 2>/dev/null | tr -d '\r')"
+if ! VENV_PY_WIN="$("${VENV_PY_WSL}" -c "import sys; print(sys.executable)" 2>/dev/null | tr -d '\r')"; then
+    VENV_PY_WIN=""
+fi
 if [ -z "${VENV_PY_WIN}" ]; then
     echo "ERROR: could not resolve venv python.exe" >&2
     exit 1
