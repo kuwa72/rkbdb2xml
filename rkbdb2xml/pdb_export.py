@@ -153,25 +153,42 @@ class PdbExporter:
 
         track_id_map: Dict[str, int] = {}
         track_to_usb: Dict[int, str] = {}
+        errors: List[str] = []
 
         def process_node(node: DevicePdbNode, parent_pdb_id: int = 0) -> int:
-            pdb_node_id = ed.create_playlist(
-                node.name, parent_pdb_id, node.is_folder
-            )
+            try:
+                pdb_node_id = ed.create_playlist(
+                    node.name, parent_pdb_id, node.is_folder
+                )
+            except Exception as e:
+                msg = f"create_playlist({node.name!r}): {e}"
+                errors.append(msg)
+                self.verbose(f"[WARN] {msg}")
+                return 0
             if node.is_folder:
                 for child in node.children:
                     process_node(child, pdb_node_id)
             else:
+                self.verbose(
+                    f"[PDB] プレイリスト書き込み: {node.name} "
+                    f"({len(node.tracks)} トラック)"
+                )
                 for idx, content_id in enumerate(node.tracks, start=1):
                     if content_id not in track_id_map:
                         content = content_map.get(content_id)
                         if content is None:
-                            self.verbose(
-                                f"[WARN] トラックが見つかりません: {content_id}"
-                            )
+                            msg = f"トラックが見つかりません: {content_id}"
+                            self.verbose(f"[WARN] {msg}")
+                            errors.append(msg)
                             continue
                         dest = self._resolve_dest(usb_root, copy_map, content)
                         if dest is None:
+                            msg = (
+                                f"コピー先が見つかりません: {content_id} "
+                                f"(FolderPath={getattr(content, 'FolderPath', None)})"
+                            )
+                            self.verbose(f"[WARN] {msg}")
+                            errors.append(msg)
                             continue
 
                         usb_path = "/" + dest.relative_to(usb_root).as_posix()
@@ -182,24 +199,40 @@ class PdbExporter:
                         try:
                             pdb_track_id = ed.add_track(**metadata)
                         except Exception as e:
-                            self.verbose(
-                                f"[WARN] PDB トラック追加失敗 "
-                                f"({content_id}): {e}"
-                            )
+                            msg = f"add_track({content_id}, title={metadata.get('title')!r}): {e}"
+                            self.verbose(f"[WARN] {msg}")
+                            errors.append(msg)
                             continue
                         track_id_map[content_id] = pdb_track_id
                         track_to_usb[pdb_track_id] = usb_path
 
                     pdb_track_id = track_id_map.get(content_id)
                     if pdb_track_id is not None:
-                        ed.add_to_playlist(pdb_node_id, pdb_track_id, idx)
+                        try:
+                            ed.add_to_playlist(pdb_node_id, pdb_track_id, idx)
+                        except Exception as e:
+                            msg = (
+                                f"add_to_playlist({node.name}, "
+                                f"track={pdb_track_id}, idx={idx}): {e}"
+                            )
+                            self.verbose(f"[WARN] {msg}")
+                            errors.append(msg)
             return pdb_node_id
 
         for root in playlist_tree:
             process_node(root, 0)
 
+        if not track_id_map and errors:
+            raise RuntimeError(
+                "PDB 書き込みに失敗しました:\n" + "\n".join(errors[:20])
+            )
+
         ed.save(pdb_path)
-        self.verbose(f"PDB saved: {pdb_path}")
+        self.verbose(
+            f"PDB saved: {pdb_path} "
+            f"(playlists={len(ed.db.playlist_tree)}, "
+            f"tracks={len(track_id_map)})"
+        )
 
         for content_id, pdb_track_id in track_id_map.items():
             content = content_map[content_id]
@@ -290,26 +323,27 @@ class PdbExporter:
             "date_added": date_added or datetime.date.today().isoformat(),
             "release_date": release_date,
             "analyze_path": "",
-            "tempo": self._int_or(getattr(content, "BPM", 0), 0),
-            "duration": self._int_or(getattr(content, "Length", 0), 0),
-            "year": self._int_or(getattr(content, "ReleaseYear", 0), 0),
-            "bitrate": self._int_or(getattr(content, "BitRate", 0), 0),
-            "sample_rate": self._int_or(
-                getattr(content, "SampleRate", 44100), 44100
+            "tempo": self._clip_int(getattr(content, "BPM", 0), 4, 0),
+            "duration": self._clip_int(getattr(content, "Length", 0), 2, 0),
+            "year": self._clip_int(getattr(content, "ReleaseYear", 0), 2, 0),
+            "bitrate": self._clip_int(getattr(content, "BitRate", 0), 4, 0),
+            "sample_rate": self._clip_int(
+                getattr(content, "SampleRate", 44100), 4, 44100
             ),
-            "sample_depth": self._int_or(
-                getattr(content, "BitDepth", 16), 16
+            "sample_depth": self._clip_int(
+                getattr(content, "BitDepth", 16), 2, 16
             ),
-            "file_size": self._file_size(content),
-            "track_number": self._int_or(getattr(content, "TrackNo", 0), 0),
-            "disc_number": self._int_or(getattr(content, "DiscNo", 0), 0),
-            "play_count": self._int_or(
+            "file_size": self._clip_int(self._file_size(content), 4, 0),
+            "track_number": self._clip_int(getattr(content, "TrackNo", 0), 4, 0),
+            "disc_number": self._clip_int(getattr(content, "DiscNo", 0), 2, 0),
+            "play_count": self._clip_int(
                 getattr(content, "DJPlayCount", None)
                 or getattr(content, "PlayCount", 0),
+                2,
                 0,
             ),
-            "rating": self._int_or(getattr(content, "Rating", 0), 0),
-            "color_id": self._int_or(getattr(content, "ColorID", 0), 0),
+            "rating": self._clip_int(getattr(content, "Rating", 0), 1, 0),
+            "color_id": self._clip_int(getattr(content, "ColorID", 0), 1, 0),
             "artwork_id": 0,
         }
 
@@ -333,6 +367,22 @@ class PdbExporter:
             return v if v >= 0 else default
         except (ValueError, TypeError):
             return default
+
+    @staticmethod
+    def _clip_int(value: Any, size: int, default: int = 0) -> int:
+        """Return a non-negative int that fits in the given unsigned byte width."""
+        if value is None:
+            return default
+        try:
+            v = int(value)
+        except (ValueError, TypeError):
+            return default
+        if v < 0:
+            return default
+        max_val = (1 << (8 * size)) - 1
+        if v > max_val:
+            return max_val
+        return v
 
     def _safe_bpm(self, value: Any) -> Optional[float]:
         try:

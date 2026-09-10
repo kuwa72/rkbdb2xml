@@ -196,14 +196,12 @@ def test_pdb_exporter_skips_missing_copy(
     playlist.add_track("4")
 
     exporter = PdbExporter(FakeDb())
-    pdb_path = exporter.build(
-        usb_root=usb_root,
-        playlist_tree=[playlist],
-        content_map=content_map,
-        copy_map=copy_map,
-        track_options={},
-    )
-
-    db = Database.from_file(pdb_path)
-    assert len(db.tracks) == 0
-    assert len(db.playlist_entries) == 0
+    with pytest.raises(RuntimeError) as exc_info:
+        exporter.build(
+            usb_root=usb_root,
+            playlist_tree=[playlist],
+            content_map=content_map,
+            copy_map=copy_map,
+            track_options={},
+        )
+    assert "コピー先が見つかりません" in str(exc_info.value)

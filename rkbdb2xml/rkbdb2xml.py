@@ -199,7 +199,15 @@ class RekordboxXMLExporter:
             self.verbose("デバイス書き出し: 選択されたトラックがありません")
             return
 
+        self.verbose(
+            f"デバイス書き出し: プレイリストツリー "
+            f"{len(xml._root_node.children)} ルート, "
+            f"選択トラック {len(self._selected_track_ids)} 件"
+        )
+
         self._copy_files(usb_root_path / "Contents")
+        copied_files = len({str(p) for p in self._copy_map.values()})
+        self.verbose(f"USB Contents コピー完了: {copied_files} ファイル")
 
         content_map = {str(c.ID): c for c in self.db.get_content().all()}
         PdbExporter(self.db, verbose=self._verbose).build(
