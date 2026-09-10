@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Any, Dict, List
 
+import pytest
 from rekordbox_pdb import Database
 
 from rkbdb2xml.rkbdb2xml import RekordboxXMLExporter
@@ -112,3 +113,29 @@ def test_device_export_creates_pdb_and_contents(tmp_path: Path) -> None:
     assert len(db_pdb.playlist_tree) == 1
     assert db_pdb.playlist_tree[0].name == "My Playlist"
     assert len(db_pdb.playlist_entries) == 1
+
+
+def test_device_export_raises_when_no_files_are_copyable(tmp_path: Path) -> None:
+    """If every selected track's file is missing, raise before building PDB."""
+    usb_root = tmp_path / "usb"
+    usb_root.mkdir()
+
+    content = FakeContent("1", "Missing Track", "/nonexistent/missing.mp3")
+    playlist = FakePlaylist("101", "My Playlist", "0")
+    playlist.track_ids = ["1"]
+    db = FakeDb([playlist], [content])
+
+    exporter = object.__new__(RekordboxXMLExporter)
+    exporter.db = db
+    exporter._playlists = ["My Playlist"]
+    exporter._playlist_options = {
+        "My Playlist": {"roman": False, "bpm": False, "orderby": "default"},
+    }
+    exporter._track_options = {}
+    exporter._copy_map = {}
+    exporter._verbose = False
+    exporter._roman_converter = None
+
+    with pytest.raises(RuntimeError) as exc_info:
+        exporter.generate_device_export(str(usb_root))
+    assert "USB にコピーできる楽曲ファイルがありません" in str(exc_info.value)

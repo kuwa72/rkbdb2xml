@@ -209,14 +209,20 @@ class RekordboxXMLExporter:
         copied_files = len({p for p in self._copy_map.values()})
         self.verbose(f"USB Contents コピー完了: {copied_files} ファイル")
 
+        all_contents = list(self.db.get_content().all())
         if copied_files == 0:
+            selected_sample = list(self._selected_track_ids)[:10]
+            content_sample = [str(c.ID) for c in all_contents[:10]]
             raise RuntimeError(
                 "USB にコピーできる楽曲ファイルがありません。\n"
-                "選択したプレイリスト内のファイルが見つからないか、"
-                "すべてのファイルパスが解決できません。"
+                f"選択トラック数: {len(self._selected_track_ids)}\n"
+                f"Content 総数: {len(all_contents)}\n"
+                f"_selected_track_ids サンプル: {selected_sample}\n"
+                f"content.ID サンプル: {content_sample}\n"
+                "これらが一致していないか、すべての FolderPath が解決できません。"
             )
 
-        content_map = {str(c.ID): c for c in self.db.get_content().all()}
+        content_map = {str(c.ID): c for c in all_contents}
         PdbExporter(self.db, verbose=self._verbose).build(
             usb_root=usb_root_path,
             playlist_tree=xml._root_node.children,
@@ -572,12 +578,20 @@ class RekordboxXMLExporter:
         copied = 0
         skipped = 0
         failed = 0
+        filtered = 0
+        content_count = 0
 
         for content in self.db.get_content().all():
+            content_count += 1
             cid = str(content.ID)
             # If specific playlists selected, filter by selected tracks
             if self._playlists:
                 if cid not in self._selected_track_ids:
+                    filtered += 1
+                    if filtered <= 5:
+                        self.verbose(
+                            f"[DEBUG] filter skip: cid={cid!r} not in _selected_track_ids"
+                        )
                     continue
 
             loc = getattr(content, 'FolderPath', None)
@@ -666,7 +680,9 @@ class RekordboxXMLExporter:
                 self.verbose(f"[WARN] タグ書き換えエラー ({dest.name}): {e}")
 
         self.verbose(
-            f"楽曲ファイル処理完了: コピー={copied}件, 失敗={failed}件, スキップ={skipped}件"
+            f"楽曲ファイル処理完了: コピー={copied}件, 失敗={failed}件, "
+            f"スキップ={skipped}件, フィルタ={filtered}件, "
+            f"Content総数={content_count}件"
         )
 
     def _update_locations(self, xml_path: str, export_dir: Path) -> None:
