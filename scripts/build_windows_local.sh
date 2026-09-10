@@ -48,26 +48,48 @@ if [ -z "${LOCALAPPDATA}" ]; then
     exit 1
 fi
 WIN_VENV_DIR="${LOCALAPPDATA}\\rkbdb2xml-venv"
-VENV_WSL="$(wslpath -u "${WIN_VENV_DIR}" 2>/dev/null)"
-if [ -z "${VENV_WSL}" ]; then
-    echo "ERROR: wslpath failed for ${WIN_VENV_DIR}" >&2
+
+# Resolve the actual venv prefix. Microsoft Store Python may create the venv
+# under a redirected path (Packages/.../LocalCache), so sys.prefix is needed.
+resolve_venv_prefix() {
+    local pywin="${1}"
+    "${pywin}" -c "import sys; print(sys.prefix)" 2>/dev/null | tr -d '\r'
+}
+
+VENV_PY_WIN="$(printf '%s\\Scripts\\python.exe' "${WIN_VENV_DIR}")"
+VENV_PREFIX_WIN="$(resolve_venv_prefix "${VENV_PY_WIN}")"
+
+if [ -z "${VENV_PREFIX_WIN}" ]; then
+    echo "=== Creating Windows venv ==="
+    "${WINPY}" -m venv "${WIN_VENV_DIR}"
+    VENV_PREFIX_WIN="$(resolve_venv_prefix "${VENV_PY_WIN}")"
+fi
+
+if [ -z "${VENV_PREFIX_WIN}" ]; then
+    echo "ERROR: failed to create or resolve Windows venv (${WIN_VENV_DIR})" >&2
     exit 1
 fi
-VENV_PY_WIN="$(printf '%s\\Scripts\\python.exe' "${WIN_VENV_DIR}")"
-VENV_PY_WSL="${VENV_WSL}/Scripts/python.exe"
-VENV_REQ_WIN="$(printf '%s\\requirements.txt' "${WIN_VENV_DIR}")"
+
+# Refresh executable path and WSL paths from the resolved prefix/executable.
+VENV_PY_WIN="$("${VENV_PY_WIN}" -c "import sys; print(sys.executable)" 2>/dev/null | tr -d '\r')"
+if [ -z "${VENV_PY_WIN}" ]; then
+    echo "ERROR: could not resolve venv python.exe" >&2
+    exit 1
+fi
+VENV_WSL="$(wslpath -u "${VENV_PREFIX_WIN}" 2>/dev/null)"
+if [ -z "${VENV_WSL}" ]; then
+    echo "ERROR: wslpath failed for ${VENV_PREFIX_WIN}" >&2
+    exit 1
+fi
+VENV_PY_WSL="$(wslpath -u "${VENV_PY_WIN}" 2>/dev/null)"
+VENV_REQ_WIN="$(printf '%s\\requirements.txt' "${VENV_PREFIX_WIN}")"
 VENV_REQ_WSL="${VENV_WSL}/requirements.txt"
 VENV_MARKER_WSL="${VENV_WSL}/.requirements.sha256"
 
-echo "=== Windows venv: ${WIN_VENV_DIR} ==="
-
-# Create venv if missing.
-if [ ! -x "${VENV_PY_WSL}" ]; then
-    echo "=== Creating Windows venv ==="
-    "${WINPY}" -m venv "${WIN_VENV_DIR}"
-fi
+echo "=== Windows venv resolved to: ${VENV_PREFIX_WIN} ==="
 
 # Write the pinned Windows build requirements into the venv.
+mkdir -p "${VENV_WSL}"
 cat > "${VENV_REQ_WSL}" <<'EOF'
 pyinstaller
 PySide6==6.9.0
