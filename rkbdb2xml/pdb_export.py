@@ -184,7 +184,8 @@ class PdbExporter:
                         dest = self._resolve_dest(usb_root, copy_map, content)
                         if dest is None:
                             msg = (
-                                f"コピー先が見つかりません: {content_id} "
+                                f"USB Contents へのコピーが見つかりません: "
+                                f"{content_id} "
                                 f"(FolderPath={getattr(content, 'FolderPath', None)})"
                             )
                             self.verbose(f"[WARN] {msg}")

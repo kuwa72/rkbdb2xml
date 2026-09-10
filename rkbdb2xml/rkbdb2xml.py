@@ -206,8 +206,15 @@ class RekordboxXMLExporter:
         )
 
         self._copy_files(usb_root_path / "Contents")
-        copied_files = len({str(p) for p in self._copy_map.values()})
+        copied_files = len({p for p in self._copy_map.values()})
         self.verbose(f"USB Contents コピー完了: {copied_files} ファイル")
+
+        if copied_files == 0:
+            raise RuntimeError(
+                "USB にコピーできる楽曲ファイルがありません。\n"
+                "選択したプレイリスト内のファイルが見つからないか、"
+                "すべてのファイルパスが解決できません。"
+            )
 
         content_map = {str(c.ID): c for c in self.db.get_content().all()}
         PdbExporter(self.db, verbose=self._verbose).build(
@@ -581,7 +588,9 @@ class RekordboxXMLExporter:
 
             orig = self._resolve_file_path(loc)
             if not orig or not orig.exists():
-                print(f"[WARN] 楽曲ファイルが見つかりません: {loc} (解決パス: {orig})")
+                self.verbose(
+                    f"[WARN] 楽曲ファイルが見つかりません: {loc} (解決パス: {orig})"
+                )
                 failed += 1
                 continue
 
@@ -597,7 +606,9 @@ class RekordboxXMLExporter:
                     shutil.copy2(orig, dest)
                     copied += 1
                 except Exception as e:
-                    print(f"[ERROR] コピー失敗: {orig} → {dest}: {e}")
+                    self.verbose(
+                        f"[ERROR] コピー失敗: {orig} → {dest}: {e}"
+                    )
                     failed += 1
                     continue
             else:
@@ -654,7 +665,9 @@ class RekordboxXMLExporter:
             except Exception as e:
                 self.verbose(f"[WARN] タグ書き換えエラー ({dest.name}): {e}")
 
-        print(f"楽曲ファイル処理完了: コピー={copied}件, 失敗={failed}件, スキップ={skipped}件")
+        self.verbose(
+            f"楽曲ファイル処理完了: コピー={copied}件, 失敗={failed}件, スキップ={skipped}件"
+        )
 
     def _update_locations(self, xml_path: str, export_dir: Path) -> None:
         """

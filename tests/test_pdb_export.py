@@ -204,4 +204,4 @@ def test_pdb_exporter_skips_missing_copy(
             copy_map=copy_map,
             track_options={},
         )
-    assert "コピー先が見つかりません" in str(exc_info.value)
+    assert "USB Contents へのコピーが見つかりません" in str(exc_info.value)
