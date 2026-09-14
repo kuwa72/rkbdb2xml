@@ -62,15 +62,15 @@ rkbdb2xml は Rekordbox のデータベースから、Rekordbox 標準のエク�
 
 GUI バイナリを使う場合、インストールは不要です。ソースから動かす場合:
 
-- Python 3.8+
-- pyrekordbox>=0.4.0 / PySide6 / mutagen / romann / psutil
+- Python 3.10+
+- pyrekordbox>=0.4.0 / PySide6 / mutagen / romann / psutil / rekordbox-pdb
 
 ## Development
 
 ```bash
 git clone https://github.com/kuwa72/rkbdb2xml.git
 cd rkbdb2xml
-scripts/setup_env.sh          # .venv 作成 + 依存インストール
+scripts/setup_env.sh          # .venv 作成 + 依存インストール + ラベル作成(gh 認証時)
 scripts/test.sh               # 構文チェック + テスト
 ```
 
