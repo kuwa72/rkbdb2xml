@@ -56,16 +56,25 @@ resolve_venv_prefix() {
     "${pywin}" -c "import sys; print(sys.prefix)" 2>/dev/null | tr -d '\r'
 }
 
-# Use the WSL-mount path to invoke the venv Python; Windows-style paths like
-# C:\... are not valid command names from inside WSL.
-VENV_PY_WSL="$(wslpath -u "$(printf '%s\\Scripts\\python.exe' "${WIN_VENV_DIR}")" 2>/dev/null)"
-if [ -z "${VENV_PY_WSL}" ]; then
-    echo "ERROR: wslpath failed for ${WIN_VENV_DIR}\\Scripts\\python.exe" >&2
-    exit 1
+# Check if a venv already exists at the standard path or the redirected Store Python path.
+VENV_PY_WSL=""
+VENV_PREFIX_WIN=""
+
+STD_PY_WSL="$(wslpath -u "$(printf '%s\\Scripts\\python.exe' "${WIN_VENV_DIR}")" 2>/dev/null || true)"
+if [ -x "${STD_PY_WSL}" ]; then
+    VENV_PY_WSL="${STD_PY_WSL}"
+else
+    # Check for Microsoft Store Python redirected venv under LocalCache
+    STORE_VENV_PY="$(ls -1d /mnt/c/Users/*/AppData/Local/Packages/PythonSoftwareFoundation.Python.3.*/LocalCache/Local/rkbdb2xml-venv/Scripts/python.exe 2>/dev/null | head -n 1 || true)"
+    if [ -x "${STORE_VENV_PY}" ]; then
+        VENV_PY_WSL="${STORE_VENV_PY}"
+    fi
 fi
 
-if ! VENV_PREFIX_WIN="$(resolve_venv_prefix "${VENV_PY_WSL}")"; then
-    VENV_PREFIX_WIN=""
+if [ -n "${VENV_PY_WSL}" ]; then
+    if ! VENV_PREFIX_WIN="$(resolve_venv_prefix "${VENV_PY_WSL}")"; then
+        VENV_PREFIX_WIN=""
+    fi
 fi
 
 if [ -z "${VENV_PREFIX_WIN}" ]; then
