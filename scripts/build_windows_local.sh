@@ -13,14 +13,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-DEST=""
 WINPY="${WINPY:-/mnt/c/Users/ykuwa/AppData/Local/Microsoft/WindowsApps/python3.13.exe}"
 if [ ! -x "${WINPY}" ]; then
     WINPY="$(dirname "${WINPY}")/python.exe"
 fi
 
 # Default dest: %USERPROFILE%\prd\rkbdb2xml\rkbdb2xml-gui-windows-amd64.exe
-# (overridable via argv[1]). Resolved through the Windows env, not hardcoded.
+# (overridable via argv). Resolved through the Windows env, not hardcoded.
 default_dest() {
     local profile=""
     if [ -x "${WINPY}" ]; then
@@ -36,7 +35,26 @@ default_dest() {
     printf '%s/prd/rkbdb2xml/rkbdb2xml-gui-windows-amd64.exe' "$(wslpath "${profile}")"
 }
 
-DEST="${1:-$(default_dest)}"
+BUILD_MODE="${BUILD_MODE:-onefile}"
+DEST=""
+
+for arg in "$@"; do
+    case "${arg}" in
+        --onedir)
+            BUILD_MODE="onedir"
+            ;;
+        --onefile)
+            BUILD_MODE="onefile"
+            ;;
+        *)
+            if [ -z "${DEST}" ]; then
+                DEST="${arg}"
+            fi
+            ;;
+    esac
+done
+
+DEST="${DEST:-$(default_dest)}"
 
 [ -d /mnt/c ] || { echo "ERROR: /mnt/c not found. Run this script from WSL." >&2; exit 1; }
 [ -x "${WINPY}" ] || { echo "ERROR: Windows Python not found (${WINPY}). Set WINPY." >&2; exit 1; }
@@ -142,13 +160,39 @@ else
 fi
 
 # Use Windows local storage (%LOCALAPPDATA%\rkbdb2xml-build) for PyInstaller
-# workpath and distpath. This avoids thousands of slow cross-filesystem I/O
+# workpath, distpath, and source tree. This avoids slow cross-filesystem I/O
 # operations over the WSL2 9P/Plan9 boundary during packaging and compression.
 WIN_BUILD_DIR="${LOCALAPPDATA}\\rkbdb2xml-build"
 WIN_WORK_DIR="${WIN_BUILD_DIR}\\work"
 WIN_DIST_DIR="${WIN_BUILD_DIR}\\dist"
+WIN_SRC_DIR="${WIN_BUILD_DIR}\\src"
 BUILD_DIR_WSL="$(wslpath -u "${WIN_BUILD_DIR}")"
-DIST_EXE_WSL="${BUILD_DIR_WSL}/dist/rkbdb2xml-gui.exe"
+SRC_DIR_WSL="${BUILD_DIR_WSL}/src"
+DIST_DIR_WSL="${BUILD_DIR_WSL}/dist"
+
+if [ "${BUILD_MODE}" = "onedir" ]; then
+    DIST_EXE_WSL="${DIST_DIR_WSL}/rkbdb2xml-gui/rkbdb2xml-gui.exe"
+else
+    DIST_EXE_WSL="${DIST_DIR_WSL}/rkbdb2xml-gui.exe"
+fi
+
+# Sync source tree to Windows local storage so PyInstaller runs completely
+# on NTFS, avoiding UNC path stat/read overhead during module Analysis.
+echo "=== Syncing source tree to Windows local storage ==="
+mkdir -p "${SRC_DIR_WSL}"
+rsync -a --delete \
+    --exclude '.git' \
+    --exclude 'build' \
+    --exclude 'dist' \
+    --exclude '__pycache__' \
+    --exclude '.pytest_cache' \
+    --exclude 'tests' \
+    --exclude 'venv' \
+    --exclude '.venv' \
+    --exclude '.venv-win' \
+    --exclude '.serena' \
+    --exclude 'graphify-out' \
+    . "${SRC_DIR_WSL}/"
 
 # Decide whether to use --clean. Omitting it lets PyInstaller reuse build/ cache,
 # which is much faster for incremental builds.
@@ -157,27 +201,40 @@ if [ "${BUILD_CLEAN:-0}" = "1" ]; then
     CLEAN_FLAG="--clean"
 fi
 
-echo "=== Building Windows exe with PyInstaller ==="
-SPEC_WIN="$(wslpath -w rkbdb2xml-gui.spec)"
-"${VENV_PY_WSL}" -m PyInstaller ${CLEAN_FLAG} --noconfirm \
-    --workpath "${WIN_WORK_DIR}" \
-    --distpath "${WIN_DIST_DIR}" \
-    "${SPEC_WIN}"
+echo "=== Building Windows exe with PyInstaller (mode: ${BUILD_MODE}) ==="
+(
+    cd "${SRC_DIR_WSL}"
+    export RKBDB2XML_BUILD_MODE="${BUILD_MODE}"
+    "${VENV_PY_WSL}" -m PyInstaller ${CLEAN_FLAG} --noconfirm \
+        --workpath "${WIN_WORK_DIR}" \
+        --distpath "${WIN_DIST_DIR}" \
+        rkbdb2xml-gui.spec
+)
 
 echo "=== Verifying ${DIST_EXE_WSL} ==="
-python3 - "${DIST_EXE_WSL}" <<'PY'
+python3 - "${DIST_EXE_WSL}" "${BUILD_MODE}" <<'PY'
 import sys
 
 path = sys.argv[1]
+mode = sys.argv[2] if len(sys.argv) > 2 else "onefile"
 with open(path, "rb") as f:
     data = f.read()
 assert data[:2] == b"MZ", "not a PE file"
-assert data.rfind(b"MEI\x0c\x0b\x0a\x0b\x0e") != -1, "PyInstaller archive missing (truncated build?)"
-print(f"  OK: {len(data)} bytes, PE + PyInstaller archive present")
+if mode == "onefile":
+    assert data.rfind(b"MEI\x0c\x0b\x0a\x0b\x0e") != -1, "PyInstaller archive missing (truncated build?)"
+print(f"  OK: {len(data)} bytes, PE valid (mode: {mode})")
 PY
 
-echo "=== Copying to ${DEST} ==="
-mkdir -p "$(dirname "${DEST}")"
-cp "${DIST_EXE_WSL}" "${DEST}"
-ls -la "${DEST}"
+if [ "${BUILD_MODE}" = "onedir" ]; then
+    DEST_DIR="$(dirname "${DEST}")/rkbdb2xml-gui"
+    echo "=== Copying onedir bundle to ${DEST_DIR} ==="
+    mkdir -p "${DEST_DIR}"
+    rsync -a --delete "${DIST_DIR_WSL}/rkbdb2xml-gui/" "${DEST_DIR}/"
+    ls -la "${DEST_DIR}/rkbdb2xml-gui.exe"
+else
+    echo "=== Copying to ${DEST} ==="
+    mkdir -p "$(dirname "${DEST}")"
+    cp "${DIST_EXE_WSL}" "${DEST}"
+    ls -la "${DEST}"
+fi
 echo "=== Done ==="
