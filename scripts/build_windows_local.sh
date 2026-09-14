@@ -126,12 +126,20 @@ EOF
 REQ_HASH="$(sha256sum "${VENV_REQ_WSL}" | cut -d' ' -f1)"
 if [ ! -f "${VENV_MARKER_WSL}" ] || [ "$(cat "${VENV_MARKER_WSL}")" != "${REQ_HASH}" ]; then
     echo "=== Installing/updating runtime deps in Windows venv ==="
-    "${VENV_PY_WSL}" -m pip install --upgrade pip
-    "${VENV_PY_WSL}" -m pip install -r "${VENV_REQ_WIN}"
+    "${VENV_PY_WSL}" -m pip install --no-input -r "${VENV_REQ_WIN}"
     echo "${REQ_HASH}" > "${VENV_MARKER_WSL}"
 else
     echo "=== Windows venv deps are up to date (hash ${REQ_HASH:0:16}...) ==="
 fi
+
+# Use Windows local storage (%LOCALAPPDATA%\rkbdb2xml-build) for PyInstaller
+# workpath and distpath. This avoids thousands of slow cross-filesystem I/O
+# operations over the WSL2 9P/Plan9 boundary during packaging and compression.
+WIN_BUILD_DIR="${LOCALAPPDATA}\\rkbdb2xml-build"
+WIN_WORK_DIR="${WIN_BUILD_DIR}\\work"
+WIN_DIST_DIR="${WIN_BUILD_DIR}\\dist"
+BUILD_DIR_WSL="$(wslpath -u "${WIN_BUILD_DIR}")"
+DIST_EXE_WSL="${BUILD_DIR_WSL}/dist/rkbdb2xml-gui.exe"
 
 # Decide whether to use --clean. Omitting it lets PyInstaller reuse build/ cache,
 # which is much faster for incremental builds.
@@ -142,10 +150,13 @@ fi
 
 echo "=== Building Windows exe with PyInstaller ==="
 SPEC_WIN="$(wslpath -w rkbdb2xml-gui.spec)"
-"${VENV_PY_WSL}" -m PyInstaller ${CLEAN_FLAG} --noconfirm "${SPEC_WIN}"
+"${VENV_PY_WSL}" -m PyInstaller ${CLEAN_FLAG} --noconfirm \
+    --workpath "${WIN_WORK_DIR}" \
+    --distpath "${WIN_DIST_DIR}" \
+    "${SPEC_WIN}"
 
-echo "=== Verifying dist/rkbdb2xml-gui.exe ==="
-python3 - dist/rkbdb2xml-gui.exe <<'PY'
+echo "=== Verifying ${DIST_EXE_WSL} ==="
+python3 - "${DIST_EXE_WSL}" <<'PY'
 import sys
 
 path = sys.argv[1]
@@ -158,6 +169,6 @@ PY
 
 echo "=== Copying to ${DEST} ==="
 mkdir -p "$(dirname "${DEST}")"
-cp dist/rkbdb2xml-gui.exe "${DEST}"
+cp "${DIST_EXE_WSL}" "${DEST}"
 ls -la "${DEST}"
 echo "=== Done ==="

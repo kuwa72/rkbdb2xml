@@ -54,11 +54,40 @@ for pkg in packages_to_collect:
     except Exception:
         pass
 
-# If SudachiDict-full happens to be installed in the build environment, this
-# keeps its Python package out of the frozen app. The dictionary data files
-# are handled by the sudachipy hook, so the safe fix is not to install
-# sudachidict_full in the build environment.
-excludes = ['sudachidict_full']
+# Exclude modules and packages that are not needed at runtime to speed up
+# analysis and bundle compression.
+excludes = [
+    'sudachidict_full',
+    'PySide6.QtQml',
+    'PySide6.QtQuick',
+    'PySide6.QtQuickWidgets',
+    'PySide6.QtQuick3D',
+    'PySide6.QtVirtualKeyboard',
+    'PySide6.QtPdf',
+    'PySide6.QtPdfWidgets',
+    'PySide6.QtWebEngine',
+    'PySide6.QtWebEngineCore',
+    'PySide6.QtWebEngineWidgets',
+    'PySide6.QtWebSockets',
+    'PySide6.QtSql',
+    'PySide6.QtTest',
+    'PySide6.QtDesigner',
+    'PySide6.QtXml',
+    'PySide6.QtHelp',
+    'PySide6.QtSensors',
+    'PySide6.QtSerialPort',
+    'PySide6.QtPositioning',
+    'PySide6.QtLocation',
+    'PySide6.QtSpatialAudio',
+    'PySide6.QtNfc',
+    'PySide6.QtBluetooth',
+    'PySide6.QtRemoteObjects',
+    'PySide6.QtScxml',
+    'PySide6.Qt3DCore',
+    'PySide6.Qt3DRender',
+    'tkinter',
+    'unittest',
+]
 
 a = Analysis(
     ['run_gui.py'],
@@ -74,10 +103,17 @@ a = Analysis(
     optimize=0,
 )
 
-# The sudachipy hook pulls in all installed sudachidict_* packages. The app
-# only ever uses the core dictionary, so drop full-dictionary data files even
-# if sudachidict_full is installed in the build environment.
-a.datas = [entry for entry in a.datas if 'sudachidict_full' not in entry[0]]
+# Filter out unused Qt binaries and dictionary data files to reduce bundle size and build time.
+unused_qt_keywords = ('qml', 'quick', 'virtualkeyboard', 'pdf', 'webengine', 'designer')
+a.datas = [
+    entry for entry in a.datas
+    if 'sudachidict_full' not in entry[0]
+    and not any(kw in entry[0].lower() for kw in unused_qt_keywords)
+]
+a.binaries = [
+    entry for entry in a.binaries
+    if not any(kw in entry[0].lower() for kw in unused_qt_keywords)
+]
 
 pyz = PYZ(a.pure)
 
