@@ -194,6 +194,9 @@ rsync -a --delete \
     --exclude 'graphify-out' \
     . "${SRC_DIR_WSL}/"
 
+# Write .build_mode for spec file to read reliably across WSL/Windows
+printf '%s\n' "${BUILD_MODE}" > "${SRC_DIR_WSL}/.build_mode"
+
 # Decide whether to use --clean. Omitting it lets PyInstaller reuse build/ cache,
 # which is much faster for incremental builds.
 CLEAN_FLAG=""
@@ -205,14 +208,30 @@ echo "=== Building Windows exe with PyInstaller (mode: ${BUILD_MODE}) ==="
 (
     cd "${SRC_DIR_WSL}"
     export RKBDB2XML_BUILD_MODE="${BUILD_MODE}"
+    export WSLENV="RKBDB2XML_BUILD_MODE:${WSLENV:-}"
     "${VENV_PY_WSL}" -m PyInstaller ${CLEAN_FLAG} --noconfirm \
         --workpath "${WIN_WORK_DIR}" \
         --distpath "${WIN_DIST_DIR}" \
         rkbdb2xml-gui.spec
 )
 
-echo "=== Verifying ${DIST_EXE_WSL} ==="
-python3 - "${DIST_EXE_WSL}" "${BUILD_MODE}" <<'PY'
+# Automatically detect the actual generated binary format
+if [ "${BUILD_MODE}" = "onedir" ] && [ -f "${DIST_DIR_WSL}/rkbdb2xml-gui/rkbdb2xml-gui.exe" ]; then
+    ACTUAL_DIST_EXE="${DIST_DIR_WSL}/rkbdb2xml-gui/rkbdb2xml-gui.exe"
+    ACTUAL_MODE="onedir"
+elif [ -f "${DIST_DIR_WSL}/rkbdb2xml-gui.exe" ]; then
+    ACTUAL_DIST_EXE="${DIST_DIR_WSL}/rkbdb2xml-gui.exe"
+    ACTUAL_MODE="onefile"
+elif [ -f "${DIST_DIR_WSL}/rkbdb2xml-gui/rkbdb2xml-gui.exe" ]; then
+    ACTUAL_DIST_EXE="${DIST_DIR_WSL}/rkbdb2xml-gui/rkbdb2xml-gui.exe"
+    ACTUAL_MODE="onedir"
+else
+    echo "ERROR: no built binary found in ${DIST_DIR_WSL}" >&2
+    exit 1
+fi
+
+echo "=== Verifying ${ACTUAL_DIST_EXE} (detected mode: ${ACTUAL_MODE}) ==="
+python3 - "${ACTUAL_DIST_EXE}" "${ACTUAL_MODE}" <<'PY'
 import sys
 
 path = sys.argv[1]
@@ -225,7 +244,7 @@ if mode == "onefile":
 print(f"  OK: {len(data)} bytes, PE valid (mode: {mode})")
 PY
 
-if [ "${BUILD_MODE}" = "onedir" ]; then
+if [ "${ACTUAL_MODE}" = "onedir" ]; then
     DEST_DIR="$(dirname "${DEST}")/rkbdb2xml-gui"
     echo "=== Copying onedir bundle to ${DEST_DIR} ==="
     mkdir -p "${DEST_DIR}"
@@ -234,7 +253,7 @@ if [ "${BUILD_MODE}" = "onedir" ]; then
 else
     echo "=== Copying to ${DEST} ==="
     mkdir -p "$(dirname "${DEST}")"
-    cp "${DIST_EXE_WSL}" "${DEST}"
+    cp "${ACTUAL_DIST_EXE}" "${DEST}"
     ls -la "${DEST}"
 fi
 echo "=== Done ==="

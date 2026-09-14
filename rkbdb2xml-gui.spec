@@ -123,8 +123,16 @@ pyz = PYZ(a.pure)
 use_upx = os.environ.get('RKBDB2XML_UPX', '').lower() in ('1', 'true', 'yes', 'on')
 
 # Mode: onefile (single .exe, default) vs onedir (directory, much faster build).
-# Set BUILD_MODE=onedir or RKBDB2XML_BUILD_MODE=onedir for fastest builds.
-build_mode = os.environ.get('RKBDB2XML_BUILD_MODE', os.environ.get('BUILD_MODE', 'onefile')).lower()
+# Set BUILD_MODE=onedir, RKBDB2XML_BUILD_MODE=onedir, or create .build_mode file.
+build_mode = ""
+if os.path.exists('.build_mode'):
+    try:
+        with open('.build_mode', 'r', encoding='utf-8') as f:
+            build_mode = f.read().strip().lower()
+    except Exception:
+        pass
+if not build_mode:
+    build_mode = os.environ.get('RKBDB2XML_BUILD_MODE', os.environ.get('BUILD_MODE', 'onefile')).lower()
 is_onedir = build_mode in ('onedir', 'dir')
 
 if is_onedir:
