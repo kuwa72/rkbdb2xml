@@ -1,5 +1,6 @@
 """Tests for CDJ-compatible DeviceSQL export."""
 
+import threading
 from pathlib import Path
 from typing import Any, Dict
 
@@ -20,6 +21,17 @@ class FakeDb:
 
     def get_anlz_paths(self, content: Any) -> Dict[str, Any]:
         return {}
+
+
+class FakeDbWithAnlz(FakeDb):
+    """Database stub that reports a DAT analysis file for every track."""
+
+    def get_anlz_paths(self, content: Any) -> Dict[str, Any]:
+        return {
+            "DAT": Path("/anlz/ANLZ0000.DAT"),
+            "EXT": Path("/anlz/ANLZ0000.EXT"),
+            "2EX": None,
+        }
 
 
 class FakeContent:
@@ -184,6 +196,64 @@ def test_pdb_exporter_nested_folders(
     assert pl_node.parent_id == sub_node.id
 
 
+def test_pdb_exporter_sets_analyze_path_when_anlz_exists(
+    usb_tree: tuple[Path, Path, Path]
+) -> None:
+    """ANLZ を持つトラックは analyze_path に USBANLZ の実パスが入る。
+
+    実機の export.pdb では ``/PIONEER/USBANLZ/P<ppp>/<hash>/ANLZ0000.DAT``
+    が書かれており、プレイヤーはこのフィールドで解析データを引く。
+    空のままだと BPM/グリッド/波形が出ない（退行防止）。
+    """
+    from rkbdb2xml.anlz import anlz_dir
+
+    usb_root, _contents, dest = usb_tree
+    content = FakeContent("1", "Test Track", "/source/test.mp3")
+    content_map: Dict[str, Any] = {"1": content}
+    copy_map: Dict[str, Path] = {"/source/test.mp3": dest}
+
+    playlist = _playlist_with("1")
+
+    exporter = PdbExporter(FakeDbWithAnlz())
+    pdb_path = exporter.build(
+        usb_root=usb_root,
+        playlist_tree=[playlist],
+        content_map=content_map,
+        copy_map=copy_map,
+        track_options={},
+    )
+
+    db = Database.from_file(pdb_path)
+    track = db.tracks[0]
+    expected = (
+        f"/PIONEER/USBANLZ/"
+        f"{anlz_dir(track.file_path).as_posix()}/ANLZ0000.DAT"
+    )
+    assert track.analyze_path == expected
+
+
+def test_pdb_exporter_empty_analyze_path_without_anlz(
+    usb_tree: tuple[Path, Path, Path]
+) -> None:
+    """ANLZ がないトラックは analyze_path が空のまま。"""
+    usb_root, _contents, dest = usb_tree
+    content = FakeContent("1", "Test Track", "/source/test.mp3")
+    content_map: Dict[str, Any] = {"1": content}
+    copy_map: Dict[str, Path] = {"/source/test.mp3": dest}
+
+    exporter = PdbExporter(FakeDb())
+    pdb_path = exporter.build(
+        usb_root=usb_root,
+        playlist_tree=[_playlist_with("1")],
+        content_map=content_map,
+        copy_map=copy_map,
+        track_options={},
+    )
+
+    db = Database.from_file(pdb_path)
+    assert db.tracks[0].analyze_path == ""
+
+
 def test_pdb_exporter_skips_missing_copy(
     usb_tree: tuple[Path, Path, Path]
 ) -> None:
@@ -205,3 +275,177 @@ def test_pdb_exporter_skips_missing_copy(
             track_options={},
         )
     assert "USB Contents へのコピーが見つかりません" in str(exc_info.value)
+
+
+# ----- キャンセルと原子的書き込み（Issue #14） -----------------------------------------
+
+
+def _playlist_with(
+    content_id: str, name: str = "My Playlist"
+) -> DevicePdbNode:
+    playlist = DevicePdbNode(name, is_folder=False)
+    playlist.add_track(content_id)
+    return playlist
+
+
+def test_pdb_exporter_pre_cancelled_writes_nothing(
+    usb_tree: tuple[Path, Path, Path],
+) -> None:
+    """キャンセル済みなら export.pdb も一時ファイルも書かない。"""
+    usb_root, _contents, dest = usb_tree
+    content = FakeContent("1", "Test Track", "/source/test.mp3")
+    content_map: Dict[str, Any] = {"1": content}
+    copy_map: Dict[str, Path] = {"/source/test.mp3": dest}
+
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    exporter = PdbExporter(FakeDb())
+    result = exporter.build(
+        usb_root=usb_root,
+        playlist_tree=[_playlist_with("1")],
+        content_map=content_map,
+        copy_map=copy_map,
+        track_options={},
+        cancel_event=cancel_event,
+    )
+
+    assert result is None
+    pdb_path = usb_root / "PIONEER" / "rekordbox" / "export.pdb"
+    assert not pdb_path.exists()
+    assert not pdb_path.with_name("export.pdb.tmp").exists()
+
+
+def test_pdb_exporter_cancelled_mid_build_writes_nothing(
+    usb_tree: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """構築途中のキャンセルでは、未完成 PDB を USB に残さない。"""
+    from rekordbox_pdb.edit import PdbEditor
+
+    usb_root, _contents, dest = usb_tree
+    content = FakeContent("1", "Test Track", "/source/test.mp3")
+    content_map: Dict[str, Any] = {"1": content}
+    copy_map: Dict[str, Path] = {"/source/test.mp3": dest}
+
+    cancel_event = threading.Event()
+    orig_create_playlist = PdbEditor.create_playlist
+
+    def cancelling_create(*a, **kw):
+        cancel_event.set()
+        return orig_create_playlist(*a, **kw)
+
+    monkeypatch.setattr(PdbEditor, "create_playlist", cancelling_create)
+
+    exporter = PdbExporter(FakeDb())
+    result = exporter.build(
+        usb_root=usb_root,
+        playlist_tree=[_playlist_with("1")],
+        content_map=content_map,
+        copy_map=copy_map,
+        track_options={},
+        cancel_event=cancel_event,
+    )
+
+    assert result is None
+    pdb_path = usb_root / "PIONEER" / "rekordbox" / "export.pdb"
+    assert not pdb_path.exists()
+    assert not pdb_path.with_name("export.pdb.tmp").exists()
+
+
+def test_pdb_exporter_writes_atomically_leaves_no_tmp(
+    usb_tree: tuple[Path, Path, Path]
+) -> None:
+    """正常時: export.pdb だけが残り、一時ファイルは残らない。"""
+    usb_root, _contents, dest = usb_tree
+    content = FakeContent("1", "Test Track", "/source/test.mp3")
+    content_map: Dict[str, Any] = {"1": content}
+    copy_map: Dict[str, Path] = {"/source/test.mp3": dest}
+
+    exporter = PdbExporter(FakeDb())
+    pdb_path = exporter.build(
+        usb_root=usb_root,
+        playlist_tree=[_playlist_with("1")],
+        content_map=content_map,
+        copy_map=copy_map,
+        track_options={},
+    )
+
+    assert pdb_path == usb_root / "PIONEER" / "rekordbox" / "export.pdb"
+    assert pdb_path.exists()
+    assert not pdb_path.with_name("export.pdb.tmp").exists()
+    db = Database.from_file(pdb_path)  # 読める = 完全なファイル
+    assert len(db.tracks) == 1
+
+
+def test_pdb_exporter_failed_save_keeps_previous_pdb(
+    usb_tree: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """書き込み失敗時: 一時ファイルを削除し、既存の export.pdb は無傷のまま。"""
+    from rekordbox_pdb.edit import PdbEditor
+
+    usb_root, _contents, dest = usb_tree
+    content = FakeContent("1", "Test Track", "/source/test.mp3")
+    content_map: Dict[str, Any] = {"1": content}
+    copy_map: Dict[str, Path] = {"/source/test.mp3": dest}
+
+    exporter = PdbExporter(FakeDb())
+    pdb_path = exporter.build(
+        usb_root=usb_root,
+        playlist_tree=[_playlist_with("1")],
+        content_map=content_map,
+        copy_map=copy_map,
+        track_options={},
+    )
+    old_bytes = pdb_path.read_bytes()
+
+    def failing_save(self, path: Path) -> None:
+        Path(path).write_bytes(b"garbage")  # 途中で壊れた tmp を残す
+        raise OSError("disk full")
+
+    monkeypatch.setattr(PdbEditor, "save", failing_save)
+
+    with pytest.raises(OSError):
+        exporter.build(
+            usb_root=usb_root,
+            playlist_tree=[_playlist_with("1")],
+            content_map=content_map,
+            copy_map=copy_map,
+            track_options={},
+        )
+
+    assert pdb_path.read_bytes() == old_bytes, "旧 export.pdb は上書きされない"
+    assert not pdb_path.with_name("export.pdb.tmp").exists()
+
+
+def test_pdb_exporter_cancelled_during_anlz_keeps_complete_pdb(
+    usb_tree: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ANLZ コピー中のキャンセル: export.pdb は完成済みのまま残る。"""
+    import rkbdb2xml.pdb_export as pdb_mod
+
+    usb_root, _contents, dest = usb_tree
+    content = FakeContent("1", "Test Track", "/source/test.mp3")
+    content_map: Dict[str, Any] = {"1": content}
+    copy_map: Dict[str, Path] = {"/source/test.mp3": dest}
+
+    cancel_event = threading.Event()
+
+    def set_cancel(*a, **kw):
+        cancel_event.set()
+
+    monkeypatch.setattr(pdb_mod.anlz, "copy_anlz_for_content", set_cancel)
+
+    exporter = PdbExporter(FakeDb())
+    pdb_path = exporter.build(
+        usb_root=usb_root,
+        playlist_tree=[_playlist_with("1")],
+        content_map=content_map,
+        copy_map=copy_map,
+        track_options={},
+        cancel_event=cancel_event,
+    )
+
+    assert pdb_path is not None
+    db = Database.from_file(pdb_path)
+    assert len(db.tracks) == 1  # PDB は書き換え済みで完全
+    assert not pdb_path.with_name("export.pdb.tmp").exists()

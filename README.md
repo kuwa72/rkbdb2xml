@@ -70,7 +70,7 @@ GUI バイナリを使う場合、インストールは不要です。ソース�
 ```bash
 git clone https://github.com/kuwa72/rkbdb2xml.git
 cd rkbdb2xml
-scripts/setup_env.sh          # .venv 作成 + 依存インストール
+scripts/setup_env.sh          # .venv 作成 + 依存インストール + ラベル作成(gh 認証時)
 scripts/test.sh               # 構文チェック + テスト
 ```
 

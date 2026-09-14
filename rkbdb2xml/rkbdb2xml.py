@@ -4,10 +4,12 @@ Main functionality for converting Rekordbox DB to XML.
 
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+import threading
+from typing import Any, Callable, Dict, List, Optional
 import urllib.parse
 import urllib.request
 import hashlib
+import io
 import mutagen
 from mutagen.id3 import ID3, TIT2, TPE1, TALB
 from mutagen.mp4 import MP4
@@ -19,10 +21,14 @@ from pyrekordbox.config import get_config, KeyExtractor, get_pioneer_install_dir
 # so the file is only ever handled by one implementation.
 import xml.etree.ElementTree as ET
 import psutil
-import shutil
 
 REKORDBOX_VERSION = "6.8.0"
 DEFAULT_XML_FILENAME = "rekordbox.xml"
+
+# 書き込み 1 回のチャンク。write-through の USB では 1 write = デバイス往復
+# 1 回なので、shutil/mutagen 既定の 1 MiB より大きくする。
+_COPY_CHUNK = 16 * 1024 * 1024
+_TAGGED_EXTS = (".mp3", ".m4a", ".mp4")
 
 try:
     from romann import RomanConverter
@@ -147,44 +153,88 @@ class RekordboxXMLExporter:
         return None
 
 
-    def generate_xml(self, path: str) -> None:
+    def generate_xml(
+        self,
+        path: str,
+        progress_cb: Optional[Callable[[int, int, int, int], None]] = None,
+        phase_cb: Optional[Callable[[str], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> None:
         """
         Generate XML file from the Rekordbox database.
 
         Args:
             path: Path where the XML file should be saved
+            progress_cb: Optional callback ``(done, total, done_bytes,
+                total_bytes)`` reported per copied track
+            phase_cb: Optional callback receiving the current phase name
+            cancel_event: Optional ``threading.Event``. When set, the file
+                copy stops at the next track boundary and the XML ``Location``
+                attributes are left pointing at the original files.
         """
+        if cancel_event is not None and cancel_event.is_set():
+            self.verbose("キャンセルされました: XML エクスポートを開始しません")
+            return
+
         xml = RekordboxXml()
         self._selected_track_ids: set = set()
         self._add_playlists(xml)
         self._add_tracks_to_collection(xml)
         self.verbose(f"Saving XML to {path}")
         xml.save(path)
-        
+
         # Files are copied directly into the same export directory as the XML
         output_file = Path(path)
         export_dir = output_file.parent
         export_dir.mkdir(parents=True, exist_ok=True)
-        
+
         self._copy_map: Dict[str, Path] = {}
         self.verbose(f"Copying files to {export_dir}")
-        self._copy_files(export_dir)
+        if phase_cb is not None:
+            phase_cb("ファイルコピー中")
+        self._copy_files(export_dir, progress_cb=progress_cb,
+                         cancel_event=cancel_event)
+        if cancel_event is not None and cancel_event.is_set():
+            self.verbose(
+                "キャンセルされました: XML Location 更新をスキップします"
+            )
+            return
         # Update XML Location attributes to point to copied files
+        if phase_cb is not None:
+            phase_cb("XML 書き込み中")
         self._update_locations(path, export_dir)
 
-    def generate_device_export(self, usb_root: str) -> None:
+    def generate_device_export(
+        self,
+        usb_root: str,
+        progress_cb: Optional[Callable[[int, int, int, int], None]] = None,
+        phase_cb: Optional[Callable[[str], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> None:
         """
         Generate a CDJ-compatible USB device library directly under ``usb_root``.
 
         Creates ``PIONEER/rekordbox/export.pdb`` and ``Contents/`` with
         copied audio files and re-used ANLZ analysis data.
 
+        When ``cancel_event`` is set during the copy phase, the partially
+        copied ``Contents/`` stays on the drive but ``export.pdb`` is not
+        touched (the previous one, if any, remains intact).
+
         Args:
             usb_root: Path to the USB drive root directory.
+            progress_cb: Optional callback ``(done, total, done_bytes,
+                total_bytes)`` reported per copied track
+            phase_cb: Optional callback receiving the current phase name
+            cancel_event: Optional ``threading.Event``; cancels the export.
         """
         from .pdb_export import DevicePdbXml, PdbExporter
 
         usb_root_path = Path(usb_root)
+        if cancel_event is not None and cancel_event.is_set():
+            self.verbose("キャンセルされました: USB 書き出しを開始しません")
+            return
+
         (usb_root_path / "PIONEER" / "rekordbox").mkdir(
             parents=True, exist_ok=True
         )
@@ -205,9 +255,18 @@ class RekordboxXMLExporter:
             f"選択トラック {len(self._selected_track_ids)} 件"
         )
 
-        self._copy_files(usb_root_path / "Contents")
+        if phase_cb is not None:
+            phase_cb("ファイルコピー中")
+        self._copy_files(usb_root_path / "Contents", progress_cb=progress_cb,
+                         cancel_event=cancel_event)
         copied_files = len({p for p in self._copy_map.values()})
         self.verbose(f"USB Contents コピー完了: {copied_files} ファイル")
+
+        if cancel_event is not None and cancel_event.is_set():
+            self.verbose(
+                "キャンセルされました: export.pdb の書き込みをスキップします"
+            )
+            return
 
         all_contents = list(self.db.get_content().all())
         if copied_files == 0:
@@ -223,12 +282,17 @@ class RekordboxXMLExporter:
             )
 
         content_map = {str(c.ID): c for c in all_contents}
+        if phase_cb is not None:
+            phase_cb("データベース書き込み中")
         PdbExporter(self.db, verbose=self._verbose).build(
             usb_root=usb_root_path,
             playlist_tree=xml._root_node.children,
             content_map=content_map,
             copy_map=self._copy_map,
             track_options=self._track_options,
+            cancel_event=cancel_event,
+            progress_cb=progress_cb,
+            phase_cb=phase_cb,
         )
 
     def _build_path_map(self, all_playlists) -> Dict[Any, str]:
@@ -571,16 +635,103 @@ class RekordboxXMLExporter:
         except Exception:
             pass
 
-    def _copy_files(self, export_dir: Path) -> None:
+    def _prepare_tagged_bytes(
+        self, orig: Path, ext_lower: str,
+        title_val: str, artist_val: str, album_val: str,
+    ) -> Optional[memoryview]:
+        """
+        Read ``orig`` and rewrite its tags in memory.
+
+        Returns the final bytes to write to the USB drive, or ``None`` when
+        the format is copied as-is (streamed without tag rewriting).
+
+        Tag rewriting must never happen on the destination file: mutagen's
+        in-place save shifts the whole file backwards in 1 MiB chunks, which
+        on flash memory means re-overwriting freshly written LBAs.
+        """
+        if ext_lower not in _TAGGED_EXTS:
+            return None
+        raw = orig.read_bytes()
+        bio = io.BytesIO(raw)
+        try:
+            if ext_lower == ".mp3":
+                try:
+                    audio = ID3(fileobj=bio)
+                except mutagen.id3.ID3NoHeaderError:
+                    audio = ID3()
+                audio['TIT2'] = TIT2(encoding=3, text=title_val)
+                audio['TPE1'] = TPE1(encoding=3, text=artist_val)
+                audio['TALB'] = TALB(encoding=3, text=album_val)
+                audio.save(fileobj=bio)
+            else:
+                audio = MP4(fileobj=bio)
+                if audio.tags is None:
+                    audio.add_tags()
+                audio.tags['\xa9nam'] = [title_val]
+                audio.tags['\xa9ART'] = [artist_val]
+                audio.tags['\xa9alb'] = [album_val]
+                audio.save(fileobj=bio)
+        except Exception as e:
+            # タグだけ失敗した場合は原本のまま書く（旧実装と同じ結果）
+            self.verbose(f"[WARN] タグ書き換えエラー ({orig.name}): {e}")
+            return memoryview(raw)
+        return bio.getbuffer()
+
+    def _write_sequential(self, dest: Path, data) -> None:
+        """Write ``data`` to ``dest`` as one forward stream of large chunks."""
+        view = memoryview(data)
+        with open(dest, "wb", buffering=0) as f:
+            for off in range(0, len(view), _COPY_CHUNK):
+                f.write(view[off:off + _COPY_CHUNK])
+
+    def _stream_copy(self, orig: Path, dest: Path) -> None:
+        """Chunked copy for formats that need no tag rewriting."""
+        buf = bytearray(_COPY_CHUNK)
+        view = memoryview(buf)
+        with open(orig, "rb", buffering=0) as src, \
+                open(dest, "wb", buffering=0) as dst:
+            while True:
+                n = src.readinto(buf)
+                if not n:
+                    break
+                dst.write(view[:n])
+
+    def _copy_files(
+        self,
+        export_dir: Path,
+        progress_cb: Optional[Callable[[int, int, int, int], None]] = None,
+        cancel_event: Optional[threading.Event] = None,
+    ) -> None:
         """
         Copy selected track files to export directory, preserving audio metadata.
+
+        Every file is written exactly once, as a single forward stream:
+        tags are rewritten on the source bytes in memory, never in place on
+        the destination. Random rewrites on flash memory are what make the
+        export slow, so the destination is only ever appended to by creation.
+
+        Args:
+            export_dir: Destination directory for the copied files
+            progress_cb: Optional callback ``(done, total, done_bytes,
+                total_bytes)``. Called once with ``(0, total, 0, total_bytes)``
+                before the copy loop and after every processed track, whether
+                it was copied, skipped or failed. ``total``/``total_bytes`` are
+                the number and combined source size of the copy jobs.
+            cancel_event: Optional ``threading.Event``. Checked before every
+                track; when set, the copy stops at the next track boundary and
+                the files copied so far are left in place (no cleanup).
         """
+        if cancel_event is not None and cancel_event.is_set():
+            self.verbose("キャンセルされました: ファイルコピーを開始しません")
+            return
+
         copied = 0
         skipped = 0
         failed = 0
         filtered = 0
         content_count = 0
 
+        jobs = []
         for content in self.db.get_content().all():
             content_count += 1
             cid = str(content.ID)
@@ -613,17 +764,84 @@ class RekordboxXMLExporter:
             md5_hex = hashlib.md5(path_for_hash).hexdigest()
             ext = orig.suffix or ".mp3"
             dest = export_dir / f"{md5_hex}{ext}"
+            jobs.append((os.path.normcase(str(orig)), orig, dest, loc, cid, content))
+
+        # ソースの同じフォルダを連続で読む（HDD ソースでの局所性。SSD では無害）
+        jobs.sort(key=lambda job: job[0])
+
+        # 進捗の分母: 総バイトはコピー対象ソースの実サイズ合計
+        total_bytes = 0
+        for _, orig, _dest, _loc, _cid, _content in jobs:
+            try:
+                total_bytes += orig.stat().st_size
+            except OSError:
+                pass
+
+        existing: set = set()
+        if export_dir.is_dir():
+            with os.scandir(export_dir) as it:
+                existing = {e.name for e in it}
+
+        if progress_cb is not None:
+            progress_cb(0, len(jobs), 0, total_bytes)
+
+        processed = 0
+        done_bytes = 0
+        for _, orig, dest, loc, cid, content in jobs:
+            if cancel_event is not None and cancel_event.is_set():
+                self.verbose(
+                    f"キャンセルされました: {processed} 件を処理済み"
+                    f"（残り {len(jobs) - processed} 件はスキップ）"
+                )
+                return
+            try:
+                done_bytes += orig.stat().st_size
+            except OSError:
+                pass
 
             # Copy file if not already copied
-            if not dest.exists():
+            if dest.name not in existing:
                 try:
-                    shutil.copy2(orig, dest)
+                    # Resolve per-track options
+                    track_opts = self._track_options.get(cid, {})
+                    use_roman = track_opts.get("roman", False)
+                    use_bpm = track_opts.get("bpm", False)
+
+                    title_val = getattr(content, 'Title', '') or ''
+                    artist_val = getattr(content, 'ArtistName', '') or getattr(content, 'Artist', '') or ''
+                    album_val = getattr(content, 'AlbumName', '') or getattr(content, 'Album', '') or ''
+
+                    if use_roman:
+                        title_val = self._romanize(title_val, force=True)
+                        artist_val = self._romanize(artist_val, force=True)
+                        album_val = self._romanize(album_val, force=True)
+
+                    if use_bpm:
+                        bpm_val = self._safe_bpm(getattr(content, 'BPM', None))
+                        if bpm_val:
+                            title_val = f"{int(bpm_val)} {title_val}"
+
+                    data = self._prepare_tagged_bytes(
+                        orig, dest.suffix.lower(), title_val, artist_val, album_val
+                    )
+                    if data is not None:
+                        self._write_sequential(dest, data)
+                    else:
+                        self._stream_copy(orig, dest)
+                    existing.add(dest.name)
                     copied += 1
                 except Exception as e:
                     self.verbose(
                         f"[ERROR] コピー失敗: {orig} → {dest}: {e}"
                     )
+                    try:
+                        dest.unlink()
+                    except OSError:
+                        pass
                     failed += 1
+                    processed += 1
+                    if progress_cb is not None:
+                        progress_cb(processed, len(jobs), done_bytes, total_bytes)
                     continue
             else:
                 copied += 1
@@ -637,47 +855,9 @@ class RekordboxXMLExporter:
                 parsed = urllib.parse.urlparse(loc)
                 self._copy_map[urllib.parse.unquote(parsed.path)] = dest
 
-            # Resolve per-track options
-            track_opts = self._track_options.get(cid, {})
-            use_roman = track_opts.get("roman", False)
-            use_bpm = track_opts.get("bpm", False)
-
-            # Rewrite metadata tags using mutagen
-            title_val = getattr(content, 'Title', '') or ''
-            artist_val = getattr(content, 'ArtistName', '') or getattr(content, 'Artist', '') or ''
-            album_val = getattr(content, 'AlbumName', '') or getattr(content, 'Album', '') or ''
-
-            if use_roman:
-                title_val = self._romanize(title_val, force=True)
-                artist_val = self._romanize(artist_val, force=True)
-                album_val = self._romanize(album_val, force=True)
-
-            if use_bpm:
-                bpm_val = self._safe_bpm(getattr(content, 'BPM', None))
-                if bpm_val:
-                    title_val = f"{int(bpm_val)} {title_val}"
-
-            ext_lower = dest.suffix.lower()
-            try:
-                if ext_lower == '.mp3':
-                    try:
-                        audio = ID3(dest)
-                    except mutagen.id3.ID3NoHeaderError:
-                        audio = ID3()
-                    audio['TIT2'] = TIT2(encoding=3, text=title_val)
-                    audio['TPE1'] = TPE1(encoding=3, text=artist_val)
-                    audio['TALB'] = TALB(encoding=3, text=album_val)
-                    audio.save(dest)
-                elif ext_lower in ('.m4a', '.mp4'):
-                    audio = MP4(dest)
-                    if audio.tags is None:
-                        audio.add_tags()
-                    audio.tags['\xa9nam'] = [title_val]
-                    audio.tags['\xa9ART'] = [artist_val]
-                    audio.tags['\xa9alb'] = [album_val]
-                    audio.save()
-            except Exception as e:
-                self.verbose(f"[WARN] タグ書き換えエラー ({dest.name}): {e}")
+            processed += 1
+            if progress_cb is not None:
+                progress_cb(processed, len(jobs), done_bytes, total_bytes)
 
         self.verbose(
             f"楽曲ファイル処理完了: コピー={copied}件, 失敗={failed}件, "
@@ -729,6 +909,9 @@ def export_rekordbox_db_to_xml(
     verbose: bool = False,
     playlists: Optional[List[str]] = None,
     playlist_options: Optional[Dict[str, Dict[str, Any]]] = None,
+    progress_cb: Optional[Callable[[int, int, int, int], None]] = None,
+    phase_cb: Optional[Callable[[str], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> None:
     """
     Export a Rekordbox database to XML format.
@@ -741,6 +924,10 @@ def export_rekordbox_db_to_xml(
         playlists: Selected playlist paths (hierarchical path strings)
         playlist_options: Per-playlist options dict mapping playlist path
             to {"roman": bool, "bpm": bool, "orderby": str}.
+        progress_cb: Optional callback ``(done, total, done_bytes,
+            total_bytes)`` reported per copied track
+        phase_cb: Optional callback receiving the current phase name
+        cancel_event: Optional ``threading.Event``; cancels the export.
     """
     exporter = RekordboxXMLExporter(
         db_path,
@@ -750,7 +937,12 @@ def export_rekordbox_db_to_xml(
         playlist_options=playlist_options,
     )
     try:
-        exporter.generate_xml(output_path)
+        exporter.generate_xml(
+            output_path,
+            progress_cb=progress_cb,
+            phase_cb=phase_cb,
+            cancel_event=cancel_event,
+        )
     finally:
         exporter.close()
 
@@ -762,6 +954,9 @@ def export_rekordbox_db_to_device(
     verbose: bool = False,
     playlists: Optional[List[str]] = None,
     playlist_options: Optional[Dict[str, Dict[str, Any]]] = None,
+    progress_cb: Optional[Callable[[int, int, int, int], None]] = None,
+    phase_cb: Optional[Callable[[str], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> None:
     """
     Export a Rekordbox database to a CDJ-compatible USB device library.
@@ -774,6 +969,10 @@ def export_rekordbox_db_to_device(
         playlists: Selected playlist paths (hierarchical path strings)
         playlist_options: Per-playlist options dict mapping playlist path
             to {"roman": bool, "bpm": bool, "orderby": str}.
+        progress_cb: Optional callback ``(done, total, done_bytes,
+            total_bytes)`` reported per copied track
+        phase_cb: Optional callback receiving the current phase name
+        cancel_event: Optional ``threading.Event``; cancels the export.
     """
     exporter = RekordboxXMLExporter(
         db_path,
@@ -783,6 +982,11 @@ def export_rekordbox_db_to_device(
         playlist_options=playlist_options,
     )
     try:
-        exporter.generate_device_export(output_path)
+        exporter.generate_device_export(
+            output_path,
+            progress_cb=progress_cb,
+            phase_cb=phase_cb,
+            cancel_event=cancel_event,
+        )
     finally:
         exporter.close()

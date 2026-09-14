@@ -10,7 +10,7 @@ Rekordbox のプレイリストを XML エクスポートし、楽曲ファイ�
 | `rkbdb2xml/player.py` | 試聴用ミニプレイヤー `PreviewPlayer`。再生状態はすべてここに閉じる |
 | `rkbdb2xml/rkbdb2xml.py` | エクスポート本体（XML 生成・ファイルコピー・タグ変換） |
 | `run_gui.py` | GUI のエントリポイント |
-| `scripts/` | `setup_env.sh` / `test.sh` / `build_local.sh` / `release.sh` |
+| `scripts/` | `setup_env.sh` / `setup_labels.sh` / `test.sh` / `build_local.sh` / `release.sh` |
 
 ## 運用ルール
 

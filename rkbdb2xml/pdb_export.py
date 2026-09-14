@@ -1,9 +1,11 @@
 """DeviceSQL (`export.pdb`) exporter for CDJ-compatible USB exports."""
 
 import datetime
+import os
 import struct
+import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from rekordbox_pdb.edit import PdbEditor
 
@@ -130,11 +132,22 @@ class PdbExporter:
         content_map: Dict[str, Any],
         copy_map: Dict[str, Path],
         track_options: Dict[str, Dict[str, Any]],
-    ) -> Path:
-        """Generate `PIONEER/rekordbox/export.pdb` under ``usb_root``."""
+        cancel_event: Optional[threading.Event] = None,
+        progress_cb: Optional[Callable[[int, int, int, int], None]] = None,
+        phase_cb: Optional[Callable[[str], None]] = None,
+    ) -> Optional[Path]:
+        """Generate `PIONEER/rekordbox/export.pdb` under ``usb_root``.
+
+        The PDB is written to ``export.pdb.tmp`` first and atomically renamed
+        to ``export.pdb`` only on success, so a CDJ never sees a partially
+        written file. When ``cancel_event`` is set before the save, nothing is
+        written and ``None`` is returned (a previous ``export.pdb``, if any,
+        is left untouched).
+        """
         pdb_dir = usb_root / "PIONEER" / "rekordbox"
         pdb_dir.mkdir(parents=True, exist_ok=True)
         pdb_path = pdb_dir / "export.pdb"
+        tmp_path = pdb_dir / "export.pdb.tmp"
 
         needs_roman = any(
             opts.get("roman", False) for opts in track_options.values()
@@ -197,6 +210,9 @@ class PdbExporter:
                                                         track_options.get(
                                                             content_id, {}),
                                                         usb_path)
+                        metadata["analyze_path"] = self._analyze_path_for(
+                            content, usb_path
+                        )
                         try:
                             pdb_track_id = ed.add_track(**metadata)
                         except Exception as e:
@@ -221,6 +237,9 @@ class PdbExporter:
             return pdb_node_id
 
         for root in playlist_tree:
+            if cancel_event is not None and cancel_event.is_set():
+                self.verbose("キャンセルされました: PDB 書き込みを中断しました")
+                return None
             process_node(root, 0)
 
         if not track_id_map and errors:
@@ -228,20 +247,44 @@ class PdbExporter:
                 "PDB 書き込みに失敗しました:\n" + "\n".join(errors[:20])
             )
 
-        ed.save(pdb_path)
+        if cancel_event is not None and cancel_event.is_set():
+            self.verbose("キャンセルされました: PDB 書き込みを中断しました")
+            return None
+
+        # 原子的書き込み: 一時ファイルに保存し、成功時のみ rename する。
+        # 未完成の export.pdb が USB 上に現れることはない。
+        try:
+            ed.save(tmp_path)
+            os.replace(tmp_path, pdb_path)
+        except Exception:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            raise
         self.verbose(
             f"PDB saved: {pdb_path} "
             f"(playlists={len(ed.db.playlist_tree)}, "
             f"tracks={len(track_id_map)})"
         )
 
+        if phase_cb is not None:
+            phase_cb("ANLZ 解析データコピー中")
+        anlz_total = len(track_id_map)
+        anlz_done = 0
         for content_id, pdb_track_id in track_id_map.items():
+            if cancel_event is not None and cancel_event.is_set():
+                self.verbose("キャンセルされました: ANLZ コピーを中断しました")
+                break
             content = content_map[content_id]
             usb_path = track_to_usb[pdb_track_id]
             anlz.copy_anlz_for_content(
                 self.db, content, usb_root, usb_path,
                 verbose=self._verbose
             )
+            anlz_done += 1
+            if progress_cb is not None:
+                progress_cb(anlz_done, anlz_total, 0, 0)
 
         return pdb_path
 
@@ -267,6 +310,25 @@ class PdbExporter:
             )
             return None
         return dest
+
+    def _analyze_path_for(self, content: Any, usb_path: str) -> str:
+        """Return the ``analyze_path`` value for the PDB track row.
+
+        Real Rekordbox exports point this at the track's ANLZ DAT file,
+        e.g. ``/PIONEER/USBANLZ/P02B/00027DA5/ANLZ0000.DAT``.  The player
+        uses this field to locate analysis data (beatgrid / waveform), so
+        it must be set for the grid to show.  Empty when the track has no
+        local ANLZ files.
+        """
+        try:
+            get_anlz_paths = getattr(self.db, "get_anlz_paths", None)
+            paths = get_anlz_paths(content) if get_anlz_paths else None
+        except Exception:
+            paths = None
+        if not paths or not any(paths.values()):
+            return ""
+        rel = anlz.anlz_dir(usb_path).as_posix()
+        return f"/PIONEER/USBANLZ/{rel}/ANLZ0000.DAT"
 
     @staticmethod
     def _get_first(content: Any, *attrs: str) -> str:

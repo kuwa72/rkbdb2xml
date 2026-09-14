@@ -11,9 +11,10 @@ import platform
 import subprocess
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import psutil
 from PySide6.QtCore import (
@@ -121,11 +122,23 @@ ROLE_TRACK_TITLE = Qt.UserRole + 5  # track title string
 # Export worker
 # ---------------------------------------------------------------------------
 class ExportWorker(QObject):
-    """Runs export_rekordbox_db_to_* in a background thread."""
+    """Runs export_rekordbox_db_to_* in a background thread.
 
-    progress = Signal(str)   # log messages
-    succeeded = Signal()     # export completed without error
-    finished = Signal()      # always emitted, success or failure
+    ``progress_count`` emits ``(done, total, done_bytes, total_bytes)`` during
+    the file-copy phase; ``phase_changed`` emits the current phase name.
+    ``cancel()`` requests a stop at the next track boundary; the export then
+    reports ``cancelled`` (a third outcome, distinct from success/error).
+    """
+
+    progress = Signal(str)  # log messages
+    # done/total are track counts; done_bytes/total_bytes can exceed 2 GiB and
+    # must not go through Qt's 32-bit int conversion (it silently wraps on
+    # Windows), so they are declared as object.
+    progress_count = Signal(int, int, object, object)
+    phase_changed = Signal(str)
+    succeeded = Signal()  # export completed without error
+    cancelled = Signal()  # export stopped by cancel(); no error occurred
+    finished = Signal()  # always emitted, success, failure or cancel
     error = Signal(str)
 
     def __init__(
@@ -142,6 +155,11 @@ class ExportWorker(QObject):
         self._playlists = playlists
         self._playlist_options = playlist_options or {}
         self._device_export = device_export
+        self._cancel_event = threading.Event()
+
+    def cancel(self) -> None:
+        """Request cancellation; the exporter checks this periodically."""
+        self._cancel_event.set()
 
     @Slot()
     def run(self) -> None:
@@ -170,6 +188,9 @@ class ExportWorker(QObject):
                         verbose=True,
                         playlists=self._playlists,
                         playlist_options=self._playlist_options,
+                        progress_cb=self._make_progress_cb(),
+                        phase_cb=self._make_phase_cb(),
+                        cancel_event=self._cancel_event,
                     )
                 else:
                     export_rekordbox_db_to_xml(
@@ -179,6 +200,9 @@ class ExportWorker(QObject):
                         verbose=True,
                         playlists=self._playlists,
                         playlist_options=self._playlist_options,
+                        progress_cb=self._make_progress_cb(),
+                        phase_cb=self._make_phase_cb(),
+                        cancel_event=self._cancel_event,
                     )
             finally:
                 sys.stdout = old_stdout
@@ -190,7 +214,10 @@ class ExportWorker(QObject):
             self.error.emit(f"{type(e).__name__}: {e}")
         else:
             self._emit_captured(capture)
-            self.succeeded.emit()
+            if self._cancel_event.is_set():
+                self.cancelled.emit()
+            else:
+                self.succeeded.emit()
         finally:
             self.finished.emit()
 
@@ -203,6 +230,22 @@ class ExportWorker(QObject):
         if output:
             for line in output.strip().splitlines()[-50:]:
                 self.progress.emit(line)
+
+    def _make_progress_cb(self):
+        """Return the exporter callback that forwards copy progress."""
+
+        def _cb(done: int, total: int, done_bytes: int, total_bytes: int) -> None:
+            self.progress_count.emit(done, total, done_bytes, total_bytes)
+
+        return _cb
+
+    def _make_phase_cb(self):
+        """Return the exporter callback that forwards phase changes."""
+
+        def _cb(phase: str) -> None:
+            self.phase_changed.emit(phase)
+
+        return _cb
 
 
 
@@ -247,14 +290,221 @@ def format_time(ms: int) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
+def format_eta(seconds: float) -> str:
+    """Format remaining seconds as a human-readable ETA (e.g. ``約3分``)."""
+    sec = max(0, int(seconds))
+    if sec < 60:
+        return f"約{sec}秒"
+    minutes = sec // 60
+    if minutes < 60:
+        return f"約{minutes}分"
+    return f"約{minutes // 60}時間{minutes % 60}分"
+
+
+class EtaEstimator:
+    """Estimate remaining time from (timestamp, done_units) samples.
+
+    The speed is the average over the last ``window_seconds`` of samples only,
+    so a temporary slowdown (or speed-up) does not distort the estimate for
+    the whole run. Units are arbitrary (count or bytes); the caller decides.
+    """
+
+    def __init__(self, window_seconds: float = 8.0) -> None:
+        self._window_seconds = window_seconds
+        self._samples: List[Tuple[float, float]] = []
+
+    def update(
+        self, done: float, total: float, now: Optional[float] = None
+    ) -> Optional[float]:
+        """Record a sample and return the remaining seconds.
+
+        Returns ``None`` until two samples within the window are available,
+        and ``0.0`` once ``done`` reaches ``total``.
+        """
+        if total <= 0:
+            return None
+        if now is None:
+            now = time.monotonic()
+        self._samples.append((now, done))
+
+        cutoff = now - self._window_seconds
+        while len(self._samples) > 1 and self._samples[0][0] < cutoff:
+            self._samples.pop(0)
+
+        if len(self._samples) < 2:
+            return None
+
+        t0, d0 = self._samples[0]
+        t1, d1 = self._samples[-1]
+        elapsed = t1 - t0
+        delta = d1 - d0
+        if elapsed <= 0 or delta <= 0:
+            return None
+        speed = delta / elapsed
+        remaining = total - done
+        if remaining <= 0:
+            return 0.0
+        return remaining / speed
+
+    def reset(self) -> None:
+        self._samples.clear()
+
+
+# ---------------------------------------------------------------------------
+# Track size resolution
+# ---------------------------------------------------------------------------
+# How reliable a resolved track size is
+SIZE_EXACT = "exact"  # stat() or DB FileSize
+SIZE_ESTIMATED = "estimated"  # Length + BitRate / file type heuristic
+SIZE_UNKNOWN = "unknown"  # no basis for a size
+SIZE_MISSING = "missing"  # file does not exist; the track is not exportable
+
+# Estimated bytes per second used when the DB has no file size: 16-bit
+# 44.1 kHz stereo PCM, typical FLAC/ALAC compression, 320 kbps fallback.
+_RATE_WAV = 176_400
+_RATE_FLAC = 100_000
+_RATE_DEFAULT = 40_000
+
+# DjmdContent.FileType is pyrekordbox's FileType IntEnum (tables.py).
+_FILE_TYPE_NAMES = {5: "FLAC", 11: "WAV", 12: "AIFF"}
+
+
+def _content_kind(content) -> str:
+    """Return an uppercased, human-readable file type of a DB row.
+
+    ``DjmdContent.FileType`` is an int (pyrekordbox's ``FileType`` IntEnum);
+    ``Kind`` is the human-readable name some exporters attach. Accept either.
+    """
+    ft = getattr(content, "FileType", None)
+    if ft is not None:
+        try:
+            if int(ft) in _FILE_TYPE_NAMES:
+                return _FILE_TYPE_NAMES[int(ft)]
+        except (ValueError, TypeError):
+            pass
+    return str(
+        getattr(content, "Kind", "") or getattr(content, "FileType", "") or ""
+    ).upper()
+
+
+def _content_ext(content) -> str:
+    """Return the lowercased file extension (e.g. ".wav") from FolderPath."""
+    loc = getattr(content, "FolderPath", None)
+    if not loc:
+        return ""
+    name = str(loc).rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+    return "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
+
+
+def estimate_bytes_per_sec(content) -> int:
+    """Estimate encoded bytes/second from BitRate, then file type.
+
+    BitRate (kbps) is the most accurate signal and covers every codec; the
+    file type (extension or DjmdContent.FileType) is the fallback. Never
+    returns None.
+    """
+    bitrate = getattr(content, "BitRate", None)
+    if bitrate is not None:
+        try:
+            br_kbps = float(bitrate)
+            if br_kbps > 0:
+                return int(br_kbps * 1000 / 8)
+        except (ValueError, TypeError):
+            pass
+
+    kind = _content_kind(content)
+    if kind in ("WAV", "AIFF", "AIF") or "WAV" in kind:
+        return _RATE_WAV
+    if "FLAC" in kind or "ALAC" in kind:
+        return _RATE_FLAC
+
+    ext = _content_ext(content)
+    if ext in (".wav", ".aif", ".aiff"):
+        return _RATE_WAV
+    if ext in (".flac", ".alac"):
+        return _RATE_FLAC
+
+    return _RATE_DEFAULT
+
+
+def track_duration_sec(content) -> Optional[float]:
+    """Return the DB Length in seconds, or None when unusable.
+
+    Rekordbox's XML TotalTime -- and the DB Length it is exported from -- is
+    in seconds (pyrekordbox rbxml.py), so no unit conversion is needed.
+    """
+    length = getattr(content, "Length", None)
+    if length is None:
+        return None
+    try:
+        dur_sec = float(length)
+    except (ValueError, TypeError):
+        return None
+    return dur_sec if dur_sec > 0 else None
+
+
+def resolve_track_size(content, resolve_path=None) -> Tuple[int, str]:
+    """Resolve a content row's byte size and how reliable it is.
+
+    Returns ``(size_bytes, status)`` where ``status`` is one of ``SIZE_EXACT``
+    (local file stat or DB FileSize), ``SIZE_ESTIMATED`` (Length + BitRate /
+    file type heuristic), ``SIZE_UNKNOWN`` (no basis for a size; 0 bytes) or
+    ``SIZE_MISSING`` (no file on disk; the track is not exportable, 0 bytes).
+
+    ``resolve_path`` is an optional callable mapping a FolderPath string to a
+    Path. When given, a track whose file cannot be resolved is reported as
+    ``SIZE_MISSING`` and the DB fallbacks (FileSize / heuristic) are skipped:
+    tracks with no file are never exported, so their sizes would only distort
+    the capacity estimate. Without ``resolve_path`` the DB fallbacks are used
+    (pure DB-row callers / unit tests).
+    """
+    loc = getattr(content, "FolderPath", None)
+    if resolve_path is not None:
+        try:
+            p = resolve_path(loc) if loc else None
+        except Exception:
+            p = None
+        if p is None or not p.exists() or not p.is_file():
+            return 0, SIZE_MISSING
+        try:
+            s = p.stat().st_size
+            if s > 0:
+                return s, SIZE_EXACT
+        except Exception:
+            return 0, SIZE_MISSING
+
+    fsize = getattr(content, "FileSize", None)
+    if fsize is not None:
+        try:
+            fs_int = int(fsize)
+            if fs_int < 0:
+                # Rekordbox stores FileSize as a 32-bit signed integer;
+                # restore the unsigned value (up to ~4.29 GB).
+                fs_int = fs_int & 0xFFFFFFFF
+            if 0 < fs_int <= 10_000_000_000:
+                return fs_int, SIZE_EXACT
+        except (ValueError, TypeError):
+            pass
+
+    dur_sec = track_duration_sec(content)
+    if dur_sec is not None:
+        return int(dur_sec * estimate_bytes_per_sec(content)), SIZE_ESTIMATED
+
+    return 0, SIZE_UNKNOWN
+
 
 # ---------------------------------------------------------------------------
 # Size calculator worker (Async)
 # ---------------------------------------------------------------------------
 class SizeCalculatorWorker(QObject):
     """Calculates total track count and size for selected playlists asynchronously."""
-    # (playlist_count, unique_track_count, total_bytes, exact_count, estimated_count)
-    finished = Signal(int, int, int, int, int)
+
+    # (playlist_count, track_count, total_bytes, exact_count,
+    #  estimated_count, excluded_count). track_count counts only exportable
+    # tracks; excluded = files missing on disk, not exported, no size.
+    # total_bytes can exceed 2 GiB, so it is declared as object: Qt's 32-bit
+    # int conversion silently wraps on Windows (see ExportWorker.progress_count).
+    finished = Signal(int, int, object, int, int, int)
 
     def __init__(self, selected_paths: List[str], db_path: Optional[str] = None) -> None:
         super().__init__()
@@ -276,13 +526,13 @@ class SizeCalculatorWorker(QObject):
         try:
             self._run()
         except Exception:
-            self.finished.emit(0, 0, 0, 0, 0)
+            self.finished.emit(0, 0, 0, 0, 0, 0)
         except BaseException:  # noqa: BLE001 - must not escape the slot
-            self.finished.emit(0, 0, 0, 0, 0)
+            self.finished.emit(0, 0, 0, 0, 0, 0)
 
     def _run(self) -> None:
         if not self._selected_paths or self._is_cancelled:
-            self.finished.emit(0, 0, 0, 0, 0)
+            self.finished.emit(0, 0, 0, 0, 0, 0)
             return
 
         db = None
@@ -323,20 +573,21 @@ class SizeCalculatorWorker(QObject):
                         target_pls.append(pl)
 
             if not target_pls or self._is_cancelled:
-                self.finished.emit(0, 0, 0, 0, 0)
+                self.finished.emit(0, 0, 0, 0, 0, 0)
                 return
 
             # Collect unique track IDs
             unique_track_ids = set()
             for pl in target_pls:
                 if self._is_cancelled:
-                    self.finished.emit(0, 0, 0, 0, 0)
+                    self.finished.emit(0, 0, 0, 0, 0, 0)
                     return
                 for entry in playlist_tracks(db, pl):
                     unique_track_ids.add(str(entry.ID))
 
             # Query track sizes
             from .rkbdb2xml import RekordboxXMLExporter
+
             resolver = RekordboxXMLExporter.__new__(RekordboxXMLExporter)
             all_contents = db.get_content().all()
             content_map: Dict[str, Any] = {}
@@ -346,94 +597,49 @@ class SizeCalculatorWorker(QObject):
             total_bytes = 0
             exact_count = 0
             estimated_count = 0
+            excluded_count = 0
+            included_count = 0
 
             for cid in unique_track_ids:
                 if self._is_cancelled:
-                    self.finished.emit(0, 0, 0, 0, 0)
+                    self.finished.emit(0, 0, 0, 0, 0, 0)
                     return
                 content = content_map.get(cid)
                 if not content:
-                    estimated_count += 1
-                    total_bytes += 10 * 1024 * 1024
+                    excluded_count += 1
                     continue
 
-                track_size = 0
-                is_exact = False
-
-                # 1. Check local file on disk
-                loc = getattr(content, "FolderPath", None)
-                if loc:
-                    p = resolver._resolve_file_path(loc)
-                    if p and p.exists() and p.is_file():
-                        try:
-                            s = p.stat().st_size
-                            if s > 0:
-                                track_size = s
-                                is_exact = True
-                        except Exception:
-                            pass
-
-                # 2. Check DB FileSize attribute (restoring signed 32-bit int overflow in Rekordbox)
-                if not is_exact:
-                    fsize = getattr(content, "FileSize", None)
-                    if fsize is not None:
-                        try:
-                            fs_int = int(fsize)
-                            if fs_int < 0:
-                                # Rekordbox stores 32-bit signed integer; restore to unsigned (up to ~4.29GB)
-                                fs_int = fs_int & 0xFFFFFFFF
-                            if 100_000 <= fs_int <= 10_000_000_000:
-                                track_size = fs_int
-                                is_exact = True
-                        except (ValueError, TypeError):
-                            pass
-
-
-                # 3. Heuristic estimation from Length and BitRate / File extension
-                if not is_exact:
-                    estimated_count += 1
-                    duration = getattr(content, "Length", None)
-                    bitrate = getattr(content, "BitRate", None)
-
-                    try:
-                        dur_sec = float(duration) if (duration and float(duration) > 0) else 240.0
-                    except (ValueError, TypeError):
-                        dur_sec = 240.0
-
-                    ext = ""
-                    if loc:
-                        ext = Path(str(loc)).suffix.lower()
-
-                    if ext in (".wav", ".aif", ".aiff"):
-                        track_size = int(dur_sec * 176_400)
-                    elif ext in (".flac", ".alac"):
-                        track_size = int(dur_sec * 100_000)
-                    elif bitrate:
-                        try:
-                            br_kbps = float(bitrate) if float(bitrate) > 0 else 320.0
-                            track_size = int(dur_sec * (br_kbps * 1000 / 8))
-                        except (ValueError, TypeError):
-                            track_size = int(dur_sec * 40_000)
-                    else:
-                        track_size = int(dur_sec * 40_000)
-
-                    track_size = max(1_000_000, track_size)
-                else:
+                size, status = resolve_track_size(
+                    content, resolve_path=resolver._resolve_file_path
+                )
+                if status in (SIZE_MISSING, SIZE_UNKNOWN):
+                    # ファイルが存在しない曲はエクスポートされないため、
+                    # 曲数・サイズのどちらにも含めない
+                    excluded_count += 1
+                    continue
+                included_count += 1
+                if status == SIZE_EXACT:
                     exact_count += 1
-
-                total_bytes += max(0, track_size)
+                else:
+                    estimated_count += 1
+                total_bytes += max(0, size)
 
             total_bytes = max(0, total_bytes)
 
             if self._is_cancelled:
-                self.finished.emit(0, 0, 0, 0, 0)
+                self.finished.emit(0, 0, 0, 0, 0, 0)
             else:
                 self.finished.emit(
-                    len(target_pls), len(unique_track_ids), total_bytes, exact_count, estimated_count
+                    len(target_pls),
+                    included_count,
+                    total_bytes,
+                    exact_count,
+                    estimated_count,
+                    excluded_count,
                 )
 
         except Exception:
-            self.finished.emit(0, 0, 0, 0, 0)
+            self.finished.emit(0, 0, 0, 0, 0, 0)
         finally:
             close_database(db)
 
@@ -460,9 +666,15 @@ class MainWindow(QMainWindow):
         self.setWindowIcon(get_app_icon())
 
         self._export_thread: Optional[QThread] = None
-        self._export_succeeded = False
+        self._export_worker: Optional[ExportWorker] = None
+        # None / "success" / "error" / "cancelled" -- set per export
+        self._export_result: Optional[str] = None
         self._is_updating_checks = False
         self._current_preview_item: Optional[QStandardItem] = None
+
+        # Export progress state (count/bytes/ETA), reset per export
+        self._eta_estimator = EtaEstimator()
+        self._current_phase = ""
 
         self._calc_thread: Optional[QThread] = None
         self._calc_worker: Optional[SizeCalculatorWorker] = None
@@ -510,38 +722,59 @@ class MainWindow(QMainWindow):
         self._rb_warn_frame.setVisible(False)
         layout.addWidget(self._rb_warn_frame)
 
-        # --- Output folder row ---
-        out_row = QHBoxLayout()
-        out_label = QLabel("出力先フォルダ:")
-        out_label.setStyleSheet("font-weight: bold;")
-        out_row.addWidget(out_label)
+        # --- XML output folder row ---
+        xml_row = QHBoxLayout()
+        xml_label = QLabel("XML出力先フォルダ:")
+        xml_label.setStyleSheet("font-weight: bold;")
+        xml_row.addWidget(xml_label)
 
         self._output_edit = QLineEdit()
         self._output_edit.setPlaceholderText("エクスポート先のフォルダを選択...")
         self._output_edit.setToolTip("XMLファイルおよび複製された楽曲ファイルが保存されるフォルダです")
-        out_row.addWidget(self._output_edit, 1)
+        xml_row.addWidget(self._output_edit, 1)
 
-        browse_btn = QPushButton("📁 参照...")
+        browse_btn = QPushButton("参照...")
         browse_btn.setToolTip("エクスポート先のフォルダを選択します")
         browse_btn.clicked.connect(self._browse_output)
-        out_row.addWidget(browse_btn)
+        xml_row.addWidget(browse_btn)
 
-        open_folder_btn = QPushButton("📂 開く")
+        open_folder_btn = QPushButton("開く")
         open_folder_btn.setToolTip("現在の出力先フォルダをファイルマネージャーで開きます")
         open_folder_btn.clicked.connect(self._open_current_output_dir)
-        out_row.addWidget(open_folder_btn)
+        xml_row.addWidget(open_folder_btn)
 
-        layout.addLayout(out_row)
+        layout.addLayout(xml_row)
 
-        # --- Device export option ---
-        self._device_export_check = QCheckBox(
-            "デバイスライブラリ形式で書き出す（USB 直下に export.pdb を生成）"
+        # --- USB drive selection row ---
+        usb_row = QHBoxLayout()
+        usb_label = QLabel("USBメモリ:")
+        usb_label.setStyleSheet("font-weight: bold;")
+        usb_row.addWidget(usb_label)
+
+        self._usb_drive_combo = QComboBox()
+        self._usb_drive_combo.setMinimumWidth(240)
+        self._usb_drive_combo.setToolTip(
+            "CDJ-350/850/900/2000 シリーズ用のデバイスライブラリ（PIONEER/rekordbox/export.pdb）を "
+            "直接書き出す USB メモリのドライブを選択します"
         )
-        self._device_export_check.setToolTip(
-            "チェックすると XML 形式ではなく、CDJ-350/850/900/2000 シリーズ用の "
-            "デバイスライブラリ（PIONEER/rekordbox/export.pdb）を直接 USB へ書き出します。"
-        )
-        layout.addWidget(self._device_export_check)
+        usb_row.addWidget(self._usb_drive_combo, 1)
+
+        refresh_usb_btn = QPushButton("更新")
+        refresh_usb_btn.setToolTip("接続されている USB メモリを再検出します")
+        refresh_usb_btn.clicked.connect(self._refresh_usb_drives)
+        usb_row.addWidget(refresh_usb_btn)
+
+        browse_usb_btn = QPushButton("参照...")
+        browse_usb_btn.setToolTip("USB メモリのドライブを手動で選択します")
+        browse_usb_btn.clicked.connect(self._browse_usb_drive)
+        usb_row.addWidget(browse_usb_btn)
+
+        open_usb_btn = QPushButton("開く")
+        open_usb_btn.setToolTip("選択中の USB メモリをファイルマネージャーで開きます")
+        open_usb_btn.clicked.connect(self._open_current_usb_drive)
+        usb_row.addWidget(open_usb_btn)
+
+        layout.addLayout(usb_row)
 
         # --- Toolbar row (Quick actions) ---
         toolbar_row = QHBoxLayout()
@@ -772,20 +1005,54 @@ class MainWindow(QMainWindow):
 
         # --- Export button row ---
         export_row = QHBoxLayout()
-        self._export_btn = QPushButton("🚀 エクスポート開始")
-        self._export_btn.setMinimumHeight(40)
-        self._export_btn.setStyleSheet(
+        self._export_xml_btn = QPushButton("rekordbox.xml に出力")
+        self._export_xml_btn.setMinimumHeight(40)
+        self._export_xml_btn.setStyleSheet(
             "QPushButton { font-size: 14px; font-weight: bold; padding: 6px 20px; }"
         )
-        self._export_btn.clicked.connect(self._on_export)
-        export_row.addWidget(self._export_btn)
+        self._export_xml_btn.clicked.connect(lambda: self._on_export("xml"))
+        export_row.addWidget(self._export_xml_btn)
 
+        self._export_usb_btn = QPushButton("USBメモリに出力")
+        self._export_usb_btn.setMinimumHeight(40)
+        self._export_usb_btn.setStyleSheet(
+            "QPushButton { font-size: 14px; font-weight: bold; padding: 6px 20px; }"
+        )
+        self._export_usb_btn.clicked.connect(lambda: self._on_export("device"))
+        export_row.addWidget(self._export_usb_btn)
 
-        self._progress = QProgressBar()
-        self._progress.setRange(0, 0)  # indeterminate
-        self._progress.setVisible(False)
-        export_row.addWidget(self._progress)
+        export_row.addStretch(1)
         layout.addLayout(export_row)
+
+        # --- Export progress row (hidden until an export starts) ---
+        progress_row = QHBoxLayout()
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 1)
+        self._progress.setValue(0)
+        self._progress.setFormat("%v/%m 曲")
+        self._progress.setVisible(False)
+        progress_row.addWidget(self._progress, 3)
+
+        self._progress_label = QLabel("")
+        self._progress_label.setStyleSheet("font-size: 12px; color: #495057;")
+        self._progress_label.setVisible(False)
+        progress_row.addWidget(self._progress_label, 5)
+
+        self._export_cancel_btn = QPushButton("キャンセル")
+        self._export_cancel_btn.setMinimumHeight(32)
+        self._export_cancel_btn.setStyleSheet(
+            "QPushButton { font-size: 13px; font-weight: bold;"
+            " padding: 2px 18px; color: #b02a37;"
+            " border: 1px solid #b02a37; border-radius: 4px;"
+            " background: #fff5f5; }"
+            "QPushButton:hover { background: #ffe3e3; }"
+            "QPushButton:disabled { color: #adb5bd; border-color: #adb5bd;"
+            " background: #f1f3f5; }"
+        )
+        self._export_cancel_btn.setVisible(False)
+        self._export_cancel_btn.clicked.connect(self._on_export_cancel)
+        progress_row.addWidget(self._export_cancel_btn)
+        layout.addLayout(progress_row)
 
         # --- Log area ---
         self._log = QPlainTextEdit()
@@ -946,9 +1213,16 @@ class MainWindow(QMainWindow):
         else:
             self._output_edit.setText(str(get_default_output_dir()))
 
-        self._device_export_check.setChecked(
-            saved.get("device_export", False)
-        )
+        # Restore USB drive selection
+        self._refresh_usb_drives()
+        saved_usb = saved.get("usb_drive", "").strip()
+        if saved_usb:
+            idx = self._usb_drive_combo.findData(saved_usb)
+            if idx < 0:
+                display, total, free = self._drive_info(saved_usb)
+                self._usb_drive_combo.insertItem(0, display, saved_usb)
+                idx = 0
+            self._usb_drive_combo.setCurrentIndex(idx)
 
         count = self._count_playlists(root)
         self._log_message(f"{count} 個のプレイリストを読み込みました")
@@ -1385,7 +1659,7 @@ class MainWindow(QMainWindow):
         self._collect_selected(root, selected_paths)
 
         if not selected_paths:
-            self._on_size_calculated(0, 0, 0, 0, 0)
+            self._on_size_calculated(0, 0, 0, 0, 0, 0)
             return
 
         worker = SizeCalculatorWorker(selected_paths)
@@ -1409,7 +1683,7 @@ class MainWindow(QMainWindow):
         self._calc_worker = None
         self._calc_thread = None
 
-    @Slot(int, int, int, int, int)
+    @Slot(int, int, object, int, int, int)
     def _on_size_calculated(
         self,
         playlist_count: int,
@@ -1417,28 +1691,59 @@ class MainWindow(QMainWindow):
         total_bytes: int,
         exact_count: int,
         estimated_count: int,
+        excluded_count: int,
     ) -> None:
         """Handle computed size and update summary label and capacity meter."""
-        if playlist_count == 0 or track_count == 0 or total_bytes == 0:
+        if playlist_count == 0:
             self._summary_label.setText("📊 選択中: 0 プレイリスト (0 曲 / 0 B)")
             self._capacity_label.setText("💾 16GB USBメモリ目安 (実効約14.8GB): 0 B / 14.8 GB (0.0% 使用)")
             self._capacity_label.setStyleSheet("font-size: 12px; color: #495057;")
             return
 
-        size_str = format_bytes(total_bytes)
+        # ファイルが存在しない曲はエクスポート対象外。曲数・サイズに含めず、
+        # 内訳に「対象外」として明示する。
+        if track_count == 0:
+            self._summary_label.setText(
+                f"📊 選択中: {playlist_count} プレイリスト ｜ "
+                f"対象外: {excluded_count:,} 曲 (ファイルなし) ｜ エクスポート可能な曲なし"
+            )
+            self._capacity_label.setText(
+                "💾 エクスポート可能な曲がないため容量判定できません"
+            )
+            self._capacity_label.setStyleSheet(
+                "font-size: 12px; color: #d97706; font-weight: bold;"
+            )
+            return
 
-        breakdown = ""
-        if estimated_count > 0:
-            breakdown = f" (実ファイル: {exact_count}曲 / 推定: {estimated_count}曲)"
+        size_str = format_bytes(total_bytes) if total_bytes > 0 else "不明"
+        approx = "約 " if estimated_count > 0 else ""
+        if excluded_count > 0:
+            breakdown = (
+                f" (実測: {exact_count}曲 / 推定: {estimated_count}曲 "
+                f"/ 対象外: {excluded_count}曲)"
+            )
+        elif estimated_count > 0:
+            breakdown = f" (実測: {exact_count}曲 / 推定: {estimated_count}曲)"
+        else:
+            breakdown = " (全曲実測)"
 
         self._summary_label.setText(
-            f"📊 選択中: {playlist_count} プレイリスト ｜ 全 {track_count:,} 曲 ｜ 合計 約 {size_str}{breakdown}"
+            f"📊 選択中: {playlist_count} プレイリスト ｜ 全 {track_count:,} 曲 ｜ 合計 {approx}{size_str}{breakdown}"
         )
 
         # Usable capacities: 16GB ≒ 14.8 GB, 32GB ≒ 29.5 GB, 64GB ≒ 59.0 GB
         USB_16GB = 14.8 * 1024 * 1024 * 1024
         USB_32GB = 29.5 * 1024 * 1024 * 1024
         USB_64GB = 59.0 * 1024 * 1024 * 1024
+
+        if total_bytes == 0:
+            self._capacity_label.setText(
+                "💾 サイズ不明のため容量判定できません (対象外の曲を確認してください)"
+            )
+            self._capacity_label.setStyleSheet(
+                "font-size: 12px; color: #d97706; font-weight: bold;"
+            )
+            return
 
         ratio_16g = (total_bytes / USB_16GB) * 100.0
 
@@ -1585,31 +1890,261 @@ class MainWindow(QMainWindow):
                 return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(p.resolve())))
 
+    def _detect_usb_drives(self) -> List[Tuple[str, str, int, int]]:
+        """Return a list of candidate removable drives as (display, path, total, free)."""
+        drives: List[Tuple[str, str, int, int]] = []
+        paths: set = set()
+
+        try:
+            partitions = psutil.disk_partitions(all=False)
+        except Exception:
+            return drives
+
+        # Linux: prefer lsblk removable flag and labels
+        if sys.platform not in ("win32", "darwin"):
+            try:
+                result = subprocess.run(
+                    ["lsblk", "-J", "-o", "NAME,MOUNTPOINT,LABEL,RM,SIZE"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                if result.returncode == 0 and result.stdout:
+                    data = json.loads(result.stdout)
+
+                    def collect_lsblk(dev: dict) -> None:
+                        for child in dev.get("children", []):
+                            collect_lsblk(child)
+                        rm = dev.get("rm")
+                        if rm in (True, "1", 1) and dev.get("mountpoint"):
+                            mp = dev["mountpoint"]
+                            if mp not in paths:
+                                paths.add(mp)
+                                label = dev.get("label", "") or ""
+                                display, total, free = self._drive_info(mp, label)
+                                drives.append((display, mp, total, free))
+
+                    for dev in data.get("blockdevices", []):
+                        collect_lsblk(dev)
+            except Exception:
+                pass
+
+        for part in partitions:
+            mp = part.mountpoint
+            if not mp or mp == "/" or mp in paths:
+                continue
+            if self._is_removable_mount(mp):
+                paths.add(mp)
+                display, total, free = self._drive_info(mp)
+                drives.append((display, mp, total, free))
+
+        return sorted(drives, key=lambda x: x[1])
+
+    def _is_removable_mount(self, mp: str) -> bool:
+        """Heuristic to identify external/removable drives by mountpoint."""
+        if sys.platform == "win32":
+            if len(mp) >= 2 and mp[1] == ":":
+                return mp[0].upper() != "C"
+            return False
+        if sys.platform == "darwin":
+            return mp.startswith("/Volumes/")
+        return any(
+            mp.startswith(prefix)
+            for prefix in ("/media/", "/mnt/", "/run/media/")
+        )
+
+    def _drive_info(self, path: str, label: str = "") -> Tuple[str, int, int]:
+        """Return (display_text, total_bytes, free_bytes) for a drive path."""
+        total = 0
+        free = 0
+        try:
+            usage = psutil.disk_usage(path)
+            total = usage.total
+            free = usage.free
+        except Exception:
+            pass
+
+        if not label:
+            label = self._get_volume_label(path)
+        display = self._format_drive_text(path, label, total, free)
+        return display, total, free
+
+    def _format_drive_text(self, path: str, label: str, total: int, free: int) -> str:
+        """Format a drive entry for the combo box."""
+        parts = [path]
+        if label:
+            parts.append(f"({label})")
+        if total > 0:
+            parts.append(f"空き {format_bytes(free)} / {format_bytes(total)}")
+        return " ".join(parts)
+
+    def _get_volume_label(self, path: str) -> str:
+        """Return the volume label for a drive path, if available."""
+        if sys.platform == "win32":
+            return self._windows_volume_label(path)
+        if sys.platform == "darwin":
+            return self._macos_volume_label(path)
+        return self._linux_volume_label(path)
+
+    @staticmethod
+    def _windows_volume_label(path: str) -> str:
+        try:
+            import ctypes
+
+            root = path
+            if not root.endswith(("\\", "/")):
+                root = root + "\\"
+            buf = ctypes.create_unicode_buffer(256)
+            ret = ctypes.windll.kernel32.GetVolumeInformationW(
+                ctypes.c_wchar_p(root),
+                buf,
+                ctypes.c_uint32(256),
+                None,
+                None,
+                None,
+                None,
+                0,
+            )
+            if ret:
+                return buf.value
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _macos_volume_label(path: str) -> str:
+        try:
+            import plistlib
+
+            result = subprocess.run(
+                ["diskutil", "info", "-plist", path],
+                capture_output=True,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode == 0 and result.stdout:
+                plist = plistlib.loads(result.stdout)
+                return str(plist.get("VolumeName", ""))
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _linux_volume_label(path: str) -> str:
+        try:
+            result = subprocess.run(
+                ["lsblk", "-J", "-o", "MOUNTPOINT,LABEL"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            if result.returncode == 0 and result.stdout:
+                data = json.loads(result.stdout)
+
+                def find_label(dev: dict) -> str:
+                    if dev.get("mountpoint") == path:
+                        return dev.get("label", "") or ""
+                    for child in dev.get("children", []):
+                        found = find_label(child)
+                        if found:
+                            return found
+                    return ""
+
+                for dev in data.get("blockdevices", []):
+                    found = find_label(dev)
+                    if found:
+                        return found
+        except Exception:
+            pass
+        return ""
+
+    def _refresh_usb_drives(self) -> None:
+        """Refresh the USB drive list and preserve the current selection."""
+        current_path = self._usb_drive_combo.currentData()
+        if not current_path:
+            current_path = self._usb_drive_combo.currentText().strip()
+
+        drives = self._detect_usb_drives()
+        self._usb_drive_combo.clear()
+        for display, path, total, free in drives:
+            self._usb_drive_combo.addItem(display, path)
+
+        if current_path:
+            idx = self._usb_drive_combo.findData(current_path)
+            if idx < 0:
+                display, total, free = self._drive_info(current_path)
+                self._usb_drive_combo.insertItem(0, display, current_path)
+                idx = 0
+            self._usb_drive_combo.setCurrentIndex(idx)
+
+    def _browse_usb_drive(self) -> None:
+        """Open a folder dialog to manually select a USB drive."""
+        folder = QFileDialog.getExistingDirectory(self, "USB メモリを選択")
+        if folder:
+            self._refresh_usb_drives()
+            idx = self._usb_drive_combo.findData(folder)
+            if idx < 0:
+                display, total, free = self._drive_info(folder)
+                self._usb_drive_combo.insertItem(0, display, folder)
+                idx = 0
+            self._usb_drive_combo.setCurrentIndex(idx)
+
+    def _open_current_usb_drive(self) -> None:
+        """Open the selected USB drive in the system file explorer."""
+        path_str = self._usb_drive_combo.currentData()
+        if not path_str:
+            path_str = self._usb_drive_combo.currentText().strip()
+        if not path_str:
+            QMessageBox.information(self, "通知", "USB メモリが選択されていません。")
+            return
+        p = Path(path_str)
+        if not p.exists():
+            QMessageBox.warning(self, "エラー", f"指定された USB メモリが見つかりません:\n{path_str}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(p.resolve())))
+
     # ----- Export -----
 
-    def _on_export(self) -> None:
+    def _on_export(self, mode: str) -> None:
         self._check_rekordbox_status()
 
-        output_path = self._output_edit.text().strip()
-        if not output_path:
-            QMessageBox.warning(self, "確認", "出力先フォルダを指定してください。")
-            return
+        if mode == "xml":
+            output_path = self._output_edit.text().strip()
+            if not output_path:
+                QMessageBox.warning(self, "確認", "XML 出力先フォルダを指定してください。")
+                return
 
-        output_dir = Path(output_path)
-        if not output_dir.exists():
-            try:
-                output_dir.mkdir(parents=True, exist_ok=True)
-            except Exception as e:
+            output_dir = Path(output_path)
+            if not output_dir.exists():
+                try:
+                    output_dir.mkdir(parents=True, exist_ok=True)
+                except Exception as e:
+                    QMessageBox.critical(
+                        self, "フォルダ作成エラー", f"フォルダの作成に失敗しました:\n{e}"
+                    )
+                    return
+
+            out_path = str(output_dir / "rekordbox.xml")
+        elif mode == "device":
+            usb_path = self._usb_drive_combo.currentData()
+            if not usb_path:
+                usb_path = self._usb_drive_combo.currentText().strip()
+            if not usb_path:
+                QMessageBox.warning(self, "確認", "USB メモリを選択してください。")
+                return
+
+            output_dir = Path(usb_path)
+            if not output_dir.exists() or not output_dir.is_dir():
                 QMessageBox.critical(
-                    self, "フォルダ作成エラー", f"フォルダの作成に失敗しました:\n{e}"
+                    self, "エラー", f"指定された USB メモリが見つかりません:\n{usb_path}"
                 )
                 return
 
-        device_export = self._device_export_check.isChecked()
-        if device_export:
-            out_path = output_path
+            out_path = usb_path
         else:
-            out_path = str(output_dir / "rekordbox.xml")
+            return
 
         # Collect selected playlists
         selected_paths: List[str] = []
@@ -1632,8 +2167,22 @@ class MainWindow(QMainWindow):
         # Save settings before export
         self._save_settings()
 
-        self._export_btn.setEnabled(False)
+        self._export_xml_btn.setEnabled(False)
+        self._export_usb_btn.setEnabled(False)
+        self._export_cancel_btn.setVisible(True)
+        self._export_cancel_btn.setEnabled(True)
+
+        # Reset progress display: determinate bar starts at 0, totals arrive
+        # with the exporter's first progress callback.
+        self._eta_estimator.reset()
+        self._current_phase = ""
+        self._export_result = None
+        self._progress.setRange(0, 1)
+        self._progress.setValue(0)
         self._progress.setVisible(True)
+        self._progress_label.setText("準備中...")
+        self._progress_label.setVisible(True)
+
         self._current_export_dir = output_dir
         self._log_message(f"エクスポート対象: {len(selected_paths)} 件の項目")
 
@@ -1643,15 +2192,17 @@ class MainWindow(QMainWindow):
             output_path=out_path,
             playlists=selected_paths,
             playlist_options=pl_options,
-            device_export=device_export,
+            device_export=(mode == "device"),
         )
         thread = QThread()
         worker.moveToThread(thread)
 
-        self._export_succeeded = False
         thread.started.connect(worker.run)
         worker.progress.connect(self._log_message)
+        worker.progress_count.connect(self._on_export_progress)
+        worker.phase_changed.connect(self._on_export_phase)
         worker.succeeded.connect(self._on_export_succeeded)
+        worker.cancelled.connect(self._on_export_cancelled)
         worker.error.connect(self._on_export_error)
         worker.finished.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
@@ -1681,11 +2232,67 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_export_succeeded(self) -> None:
-        self._export_succeeded = True
+        self._export_result = "success"
+
+    @Slot()
+    def _on_export_cancel(self) -> None:
+        """Request cancellation; the worker stops at the next track boundary."""
+        worker = getattr(self, "_export_worker", None)
+        if worker is None:
+            return
+        self._export_cancel_btn.setEnabled(False)
+        self._progress_label.setText("キャンセル中...")
+        try:
+            worker.cancel()
+        except RuntimeError:
+            pass  # worker already deleted; export must have just finished
+
+    @Slot()
+    def _on_export_cancelled(self) -> None:
+        self._export_result = "cancelled"
+        self._log_message("エクスポートはキャンセルされました。")
+        cancel_dialog = QMessageBox(self)
+        cancel_dialog.setIcon(QMessageBox.Warning)
+        cancel_dialog.setWindowTitle("エクスポートキャンセル")
+        cancel_dialog.setText("エクスポートはキャンセルされました。")
+        cancel_dialog.setInformativeText(
+            "キャンセル時点までにコピーされたファイルは出力先に残ります。\n"
+            "不完全な export.pdb は書き込まれていません。\n"
+            "USB メモリを取り外す前に、書きかけのデータを確認してください。"
+        )
+        cancel_dialog.exec()
+
+    @Slot(int, int, object, object)
+    def _on_export_progress(
+        self, done: int, total: int, done_bytes: int, total_bytes: int
+    ) -> None:
+        """Update the determinate bar and the count/bytes/ETA label."""
+        if total > 0:
+            self._progress.setRange(0, total)
+            self._progress.setValue(done)
+
+        if total_bytes > 0:
+            eta = self._eta_estimator.update(done_bytes, total_bytes)
+        else:
+            eta = self._eta_estimator.update(done, total)
+
+        text = f"{done}/{total} 曲"
+        if total_bytes > 0:
+            text += f" ・ {format_bytes(done_bytes)} / {format_bytes(total_bytes)}"
+        if eta is not None:
+            text += f" ・ 残り {format_eta(eta)}"
+        if self._current_phase:
+            text = f"{self._current_phase}: {text}"
+        self._progress_label.setText(text)
+
+    @Slot(str)
+    def _on_export_phase(self, phase: str) -> None:
+        self._current_phase = phase
+        self._progress_label.setText(f"{phase}...")
 
     @Slot(str)
     def _on_export_error(self, msg: str) -> None:
-        self._export_succeeded = False
+        self._export_result = "error"
         self._log_message(f"エラー: {msg}")
         err_dialog = QMessageBox(self)
         err_dialog.setIcon(QMessageBox.Critical)
@@ -1701,12 +2308,18 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_export_done(self) -> None:
-        self._export_btn.setEnabled(True)
+        self._export_xml_btn.setEnabled(True)
+        self._export_usb_btn.setEnabled(True)
+        self._export_cancel_btn.setVisible(False)
+        self._export_cancel_btn.setEnabled(True)
         self._progress.setVisible(False)
+        self._progress_label.setVisible(False)
+        self._current_phase = ""
         self._export_thread = None
 
-        if not getattr(self, "_export_succeeded", False):
-            return  # _on_export_error already told the user what went wrong
+        if self._export_result != "success":
+            # _on_export_error / _on_export_cancelled already told the user
+            return
 
         export_dir = getattr(self, "_current_export_dir", None)
         if export_dir and export_dir.exists():
@@ -1751,12 +2364,16 @@ class MainWindow(QMainWindow):
         options: Dict[str, dict] = {}
         self._collect_all_options(root, options)
 
+        usb_path = self._usb_drive_combo.currentData()
+        if not usb_path:
+            usb_path = self._usb_drive_combo.currentText().strip()
+
         data = {
             "output_path": self._output_edit.text().strip(),
+            "usb_drive": usb_path or "",
             "selected_playlists": selected,
             "playlist_options": options,
             "audio_output_device": self._device_combo.currentText(),
-            "device_export": self._device_export_check.isChecked(),
         }
         try:
             with SETTINGS_FILE.open("w", encoding="utf-8") as f:

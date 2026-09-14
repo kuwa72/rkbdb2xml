@@ -118,7 +118,8 @@ mutagen==1.47.0
 psutil==7.0.0
 romann==0.3.0
 SudachiDict-core==20250129
-rekordbox-pdb @ git+https://github.com/fragmede/rekordbox-pdb.git@ee3bac2f22ca11a5ce61eea35f8cb951c246eaef
+# フォーク（性能修正）: fragmede/rekordbox-pdb@ee3bac2 に再パース回避パッチを適用した私家版
+rekordbox-pdb @ git+https://github.com/kuwa72/rekordbox-pdb.git@b1cdd52d66ac393fa9d90a8b45a3a036317a3b77
 EOF
 
 # Compute hash of the requirements file to decide whether pip install is needed.
