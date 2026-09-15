@@ -1192,14 +1192,7 @@ class MainWindow(QMainWindow):
         self._model.blockSignals(False)
 
         # Refresh folder states after unblocking so the view receives data changes.
-        self._is_updating_checks = True
-        try:
-            for row in range(root.rowCount()):
-                item = root.child(row, COL_CHECK)
-                if item and item.hasChildren():
-                    self._update_parent_check_state(item)
-        finally:
-            self._is_updating_checks = False
+        self._refresh_folder_checks()
 
         self._tree.collapseAll()
 
@@ -1889,6 +1882,28 @@ class MainWindow(QMainWindow):
         except Exception:
             _log_crash_exception("_update_parent_check_state")
             raise
+
+    def _refresh_folder_checks(self) -> None:
+        """Recompute every folder's check state from its leaves, bottom-up.
+
+        Used after bulk-restoring check states at startup. Folders must be
+        aggregated deepest-first: ``_update_parent_check_state`` only recurses
+        *upwards*, so aggregating only the top level leaves mid-level folders
+        Unchecked and a checked grandchild never marks its ancestors.
+        """
+        self._is_updating_checks = True
+        try:
+            self._aggregate_folder_checks(self._model.invisibleRootItem())
+        finally:
+            self._is_updating_checks = False
+
+    def _aggregate_folder_checks(self, parent: QStandardItem) -> None:
+        """Aggregate folder check states, children before their parents."""
+        for row in range(parent.rowCount()):
+            item = parent.child(row, COL_CHECK)
+            if item and item.hasChildren():
+                self._aggregate_folder_checks(item)
+                self._update_parent_check_state(item)
 
     # ----- Output folder -----
 

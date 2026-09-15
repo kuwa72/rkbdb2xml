@@ -193,3 +193,64 @@ def test_start_async_waits_for_previous_thread(monkeypatch):
     # The fix must wait without a timeout so it never destroys a live thread.
     assert prev_thread.wait_calls == [None]
     assert window._calc_thread is None
+
+
+# ----- Startup folder-state aggregation (issue #22) -------------------------
+
+
+def test_startup_aggregation_marks_all_ancestors_partial():
+    """A checked item two levels down must mark every ancestor.
+
+    The startup restore used to aggregate only top-level folders, and
+    ``_update_parent_check_state`` only recurses *upwards* — so a mid-level
+    folder kept its restored Unchecked state and the partial marker never
+    reached the folders above it.
+    """
+    window, model = make_connected_window()
+    top = add_row(model, "Top", True, checked=False)
+    mid = add_row(top, "Mid", True, checked=False)
+    add_row(mid, "Leaf", False)
+    add_row(mid, "LeafUnchecked", False, checked=False)
+
+    window._refresh_folder_checks()
+
+    assert mid.checkState() == Qt.PartiallyChecked
+    assert top.checkState() == Qt.PartiallyChecked
+
+
+def test_startup_aggregation_handles_mixed_folder_and_leaf_children():
+    """A folder containing a partially-checked folder plus an unchecked leaf
+    must become partial, not unchecked."""
+    window, model = make_connected_window()
+    top = add_row(model, "Top", True, checked=False)
+    mid = add_row(top, "Mid", True, checked=False)
+    add_row(mid, "Deep", False)
+    add_row(top, "Shallow", False, checked=False)
+
+    window._refresh_folder_checks()
+
+    assert mid.checkState() == Qt.Checked
+    assert top.checkState() == Qt.PartiallyChecked
+
+
+def test_startup_aggregation_marks_fully_checked_folder_checked():
+    window, model = make_connected_window()
+    top = add_row(model, "Top", True, checked=False)
+    add_row(top, "A", False)
+    add_row(top, "B", False)
+
+    window._refresh_folder_checks()
+
+    assert top.checkState() == Qt.Checked
+
+
+def test_startup_aggregation_leaves_unchecked_tree_unchecked():
+    window, model = make_connected_window()
+    top = add_row(model, "Top", True, checked=False)
+    mid = add_row(top, "Mid", True, checked=False)
+    add_row(mid, "Leaf", False, checked=False)
+
+    window._refresh_folder_checks()
+
+    assert mid.checkState() == Qt.Unchecked
+    assert top.checkState() == Qt.Unchecked
