@@ -1630,29 +1630,36 @@ class MainWindow(QMainWindow):
         self._summary_label.setText("📊 エクスポート対象: 計算中...")
         self._calc_timer.start(250)  # 250ms debounce
 
+    def _join_worker(self, worker_attr: str, thread_attr: str) -> None:
+        """Cancel a worker and join its thread before dropping the references.
+
+        Destroying a still-running QThread aborts the process
+        ("QThread: Destroyed while thread is still running"), so the thread
+        must actually stop before its last Python reference goes away. Both
+        objects are deleteLater()'d when their thread finishes, so the Python
+        wrappers can outlive the C++ objects; touching one then raises
+        RuntimeError.
+        """
+        try:
+            worker = getattr(self, worker_attr)
+            if worker is not None:
+                worker.cancel()
+        except RuntimeError:
+            pass
+        setattr(self, worker_attr, None)
+        try:
+            thread = getattr(self, thread_attr)
+            if thread is not None:
+                if thread.isRunning():
+                    thread.quit()
+                thread.wait()
+        except RuntimeError:
+            pass
+        setattr(self, thread_attr, None)
+
     def _start_async_size_calculation(self) -> None:
         """Start background worker to compute size of selected playlists."""
-        # Both objects are deleteLater()'d when their thread finishes, so the
-        # Python wrappers can outlive the C++ objects. Touching one then raises
-        # RuntimeError, which would escape this slot and leave the summary
-        # label stuck on "計算中...".
-        try:
-            if self._calc_worker is not None:
-                self._calc_worker.cancel()
-        except RuntimeError:
-            pass
-        self._calc_worker = None
-        # Destroying a still-running QThread aborts the process
-        # ("QThread: Destroyed while thread is still running"). Wait for the
-        # previous thread to actually stop before dropping the reference.
-        try:
-            if self._calc_thread is not None:
-                if self._calc_thread.isRunning():
-                    self._calc_thread.quit()
-                self._calc_thread.wait()
-        except RuntimeError:
-            pass
-        self._calc_thread = None
+        self._join_worker("_calc_worker", "_calc_thread")
 
         selected_paths: List[str] = []
         root = self._model.invisibleRootItem()
@@ -1679,9 +1686,20 @@ class MainWindow(QMainWindow):
 
     @Slot()
     def _on_calc_thread_finished(self) -> None:
-        """Forget the finished worker before Qt deletes it."""
-        self._calc_worker = None
-        self._calc_thread = None
+        """Forget the finished worker before Qt deletes it.
+
+        This slot is delivered through the event queue and can arrive late:
+        ``_start_async_size_calculation()`` waits for the old thread while
+        the GUI thread is blocked, so the old thread's ``finished`` can be
+        delivered *after* a replacement thread has already been stored.
+        Clearing the attributes unconditionally would drop the last
+        reference to a still-running thread and abort the process
+        ("QThread: Destroyed while thread is still running"), so only the
+        thread that actually emitted may clear them.
+        """
+        if self.sender() is self._calc_thread:
+            self._calc_worker = None
+            self._calc_thread = None
 
     @Slot(int, int, object, int, int, int)
     def _on_size_calculated(
@@ -1694,6 +1712,10 @@ class MainWindow(QMainWindow):
         excluded_count: int,
     ) -> None:
         """Handle computed size and update summary label and capacity meter."""
+        # A cancelled worker still reports (0,0,...); a stale result must not
+        # overwrite the summary while a newer calculation is in flight.
+        if self._calc_worker is not None and self.sender() is not self._calc_worker:
+            return
         if playlist_count == 0:
             self._summary_label.setText("📊 選択中: 0 プレイリスト (0 曲 / 0 B)")
             self._capacity_label.setText("💾 16GB USBメモリ目安 (実効約14.8GB): 0 B / 14.8 GB (0.0% 使用)")
@@ -2427,8 +2449,15 @@ class MainWindow(QMainWindow):
                 self._collect_all_options(item, result)
 
     def closeEvent(self, event) -> None:
-        """Save settings when window is closed."""
+        """Stop the workers and save settings when window is closed.
+
+        A QThread that loses its last Python reference while running aborts
+        the process, so both background threads must be cancelled and
+        joined before the window's attributes go away.
+        """
         self._save_settings()
+        self._join_worker("_calc_worker", "_calc_thread")
+        self._join_worker("_export_worker", "_export_thread")
         super().closeEvent(event)
 
 
