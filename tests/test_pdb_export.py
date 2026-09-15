@@ -1,5 +1,6 @@
 """Tests for CDJ-compatible DeviceSQL export."""
 
+import struct
 import threading
 from pathlib import Path
 from typing import Any, Dict
@@ -80,6 +81,43 @@ def test_create_empty_pdb_is_valid() -> None:
     ed = PdbEditor(data)
     tid = ed.add_track(title="T", file_path="/Contents/t.mp3")
     assert tid == 1
+
+
+def _index_page_body(data: bytes, table_index: int) -> bytes:
+    """Return the index-page body (offset 0x28..) of table `table_index`."""
+    page_off = (1 + table_index) * 4096
+    return data[page_off + 0x28 : page_off + 4096]
+
+
+def test_create_empty_pdb_index_page_layout() -> None:
+    """Index ページ本体が実機フォーマットと一致する（Issue #27）。
+
+    実機の export.pdb では index ページの heap は
+    ``[page_index, 0x03FFFFFF]`` の後に 0x03FFFFFF の magic、
+    num_entries=0、first_empty=0x1fff、そして 1004 個の
+    0x1FFFFFF8 空エントリが続く。欠けると Rekordbox が
+    デバイス読み込み時に落ちる可能性がある。
+    """
+    data = create_empty_pdb()
+    for i in range(20):
+        body = _index_page_body(data, i)
+        # 0x28: page_index, 0x2c: first data page or sentinel
+        assert struct.unpack_from("<I", body, 0)[0] == 1 + i
+        assert struct.unpack_from("<I", body, 4)[0] == 0x03FFFFFF
+        # 0x30: magic, always present in real exports
+        assert struct.unpack_from("<I", body, 8)[0] == 0x03FFFFFF
+        # 0x34: zeros; 0x38: num_entries=0; 0x3a: first_empty=0x1fff
+        assert struct.unpack_from("<I", body, 0x0C)[0] == 0
+        assert struct.unpack_from("<H", body, 0x10)[0] == 0
+        assert struct.unpack_from("<H", body, 0x12)[0] == 0x1FFF
+        # 0x3c..: 1004 empty index entries, rest of page is zeros
+        for e in (0, 500, 1003):
+            assert (
+                struct.unpack_from("<I", body, 0x14 + e * 4)[0]
+                == 0x1FFFFFF8
+            )
+        tail = body[0x14 + 1004 * 4 :]
+        assert tail == bytes(len(tail))
 
 
 def test_device_pdb_xml_records_tree() -> None:
@@ -275,6 +313,74 @@ def test_pdb_exporter_skips_missing_copy(
             track_options={},
         )
     assert "USB Contents へのコピーが見つかりません" in str(exc_info.value)
+
+
+def test_pdb_exporter_entry_index_contiguous_after_skip(
+    usb_tree: tuple[Path, Path, Path]
+) -> None:
+    """コピー失敗トラックがあっても entry_index は連続する（Issue #27）。
+
+    実機の export.pdb では、エクスポートに失敗したトラックは
+    プレイリストから落とされ entry_index が詰め直される。
+    欠番が残ると Rekordbox のデバイス読み込みが落ちる可能性がある。
+    """
+    usb_root, contents, dest = usb_tree
+    dest2 = contents / "def456.mp3"
+    dest2.write_bytes(b"dummy audio 2")
+    c1 = FakeContent("1", "First", "/source/a.mp3")
+    c2 = FakeContent("2", "Missing", "/source/missing.mp3")
+    c3 = FakeContent("3", "Last", "/source/b.mp3")
+    content_map: Dict[str, Any] = {"1": c1, "2": c2, "3": c3}
+    copy_map: Dict[str, Path] = {
+        "/source/a.mp3": dest,
+        "/source/b.mp3": dest2,
+    }
+
+    playlist = DevicePdbNode("Pl", is_folder=False)
+    for cid in ("1", "2", "3"):
+        playlist.add_track(cid)
+
+    exporter = PdbExporter(FakeDb())
+    pdb_path = exporter.build(
+        usb_root=usb_root,
+        playlist_tree=[playlist],
+        content_map=content_map,
+        copy_map=copy_map,
+        track_options={},
+    )
+
+    db = Database.from_file(pdb_path)
+    entries = sorted(
+        db.playlist_entries, key=lambda e: e.entry_index)
+    assert len(entries) == 2
+    assert [e.entry_index for e in entries] == [1, 2]
+    titles = {t.id: t.title for t in db.tracks}
+    assert [titles[e.track_id] for e in entries] == ["First", "Last"]
+
+
+def test_pdb_exporter_index_page_layout_after_build(
+    usb_tree: tuple[Path, Path, Path]
+) -> None:
+    """データページ割り当て後も index ページの magic が残る（Issue #27）。"""
+    usb_root, _contents, dest = usb_tree
+    content = FakeContent("1", "Test Track", "/source/test.mp3")
+    content_map: Dict[str, Any] = {"1": content}
+    copy_map: Dict[str, Path] = {"/source/test.mp3": dest}
+
+    exporter = PdbExporter(FakeDb())
+    pdb_path = exporter.build(
+        usb_root=usb_root,
+        playlist_tree=[_playlist_with("1")],
+        content_map=content_map,
+        copy_map=copy_map,
+        track_options={},
+    )
+
+    data = pdb_path.read_bytes()
+    body = _index_page_body(data, 0)  # TRACKS テーブル
+    assert struct.unpack_from("<I", body, 4)[0] != 0x03FFFFFF  # 先頭データページ
+    assert struct.unpack_from("<I", body, 8)[0] == 0x03FFFFFF  # magic 保持
+    assert struct.unpack_from("<H", body, 0x12)[0] == 0x1FFF   # first_empty
 
 
 # ----- キャンセルと原子的書き込み（Issue #14） -----------------------------------------
