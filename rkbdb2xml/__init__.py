@@ -2,7 +2,7 @@
 rkbdb2xml: A tool to generate XML from Rekordbox database using pyrekordbox library
 """
 
-__version__ = "0.8.6"
+__version__ = "0.8.7"
 
 from .rkbdb2xml import (
     RekordboxXMLExporter,

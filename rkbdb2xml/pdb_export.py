@@ -67,9 +67,18 @@ def create_empty_pdb() -> bytes:
         struct.pack_into("<HHHHHH", buf, page_off + 0x1c, 0, 0,
                          0x1fff, 0x1fff, 1004, 0)
 
-        # Heap: [0x28] this index page number, [0x2c] 0x03FFFFFF sentinel
+        # Heap: [0x28] this index page number,
+        # [0x2c] first data page or 0x03FFFFFF sentinel,
+        # [0x30] 0x03FFFFFF magic (always present in real exports),
+        # [0x34] zeros, [0x38] num_entries=0, [0x3a] first_empty=0x1fff,
+        # [0x3c..] 1004 index entry slots filled with 0x1FFFFFF8.
         struct.pack_into("<II", buf, page_off + PAGE_HEADER_SIZE,
                          page_index, 0x03FFFFFF)
+        struct.pack_into("<I", buf, page_off + 0x30, 0x03FFFFFF)
+        struct.pack_into("<HH", buf, page_off + 0x38, 0, 0x1FFF)
+        for e in range(1004):
+            struct.pack_into("<I", buf, page_off + 0x3C + e * 4,
+                             0x1FFFFFF8)
 
     # empty-candidate pages (21..40) are left zero-filled; PdbEditor will
     # initialise them when rows are first appended.
@@ -149,6 +158,26 @@ class PdbExporter:
         pdb_path = pdb_dir / "export.pdb"
         tmp_path = pdb_dir / "export.pdb.tmp"
 
+        # rkbdb2xml が生成しない Rekordbox 側ファイル（Device Library Plus の
+        # DB や My Tag）が古いまま残っていると、新しい export.pdb と内容が
+        # 食い違い Rekordbox のデバイス読み込みが落ちる可能性がある。
+        stale = [
+            name for name in (
+                "exportLibrary.db", "exportLibrary.db-wal",
+                "exportLibrary.db-shm", "exportExt.pdb",
+                "playlists3.sync", "playlists3Plus.sync",
+            )
+            if (pdb_dir / name).exists()
+        ]
+        if stale:
+            self.verbose(
+                "[WARN] 過去の Rekordbox エクスポートのファイルが残っています: "
+                + ", ".join(stale)
+                + "。export.pdb と内容が不一致だと Rekordbox が落ちる可能性が"
+                "あります。USB メモリを初期化して再エクスポートするか、"
+                "該当ファイルを削除してください。"
+            )
+
         needs_roman = any(
             opts.get("roman", False) for opts in track_options.values()
         )
@@ -186,7 +215,8 @@ class PdbExporter:
                     f"[PDB] プレイリスト書き込み: {node.name} "
                     f"({len(node.tracks)} トラック)"
                 )
-                for idx, content_id in enumerate(node.tracks, start=1):
+                entry_index = 0
+                for content_id in node.tracks:
                     if content_id not in track_id_map:
                         content = content_map.get(content_id)
                         if content is None:
@@ -225,12 +255,17 @@ class PdbExporter:
 
                     pdb_track_id = track_id_map.get(content_id)
                     if pdb_track_id is not None:
+                        # スキップされたトラックで欠番が残らないよう、
+                        # 追加できた分だけ連番を振る（Rekordbox 純正と同じ）。
                         try:
-                            ed.add_to_playlist(pdb_node_id, pdb_track_id, idx)
+                            ed.add_to_playlist(
+                                pdb_node_id, pdb_track_id, entry_index + 1)
+                            entry_index += 1
                         except Exception as e:
                             msg = (
                                 f"add_to_playlist({node.name}, "
-                                f"track={pdb_track_id}, idx={idx}): {e}"
+                                f"track={pdb_track_id}, "
+                                f"idx={entry_index + 1}): {e}"
                             )
                             self.verbose(f"[WARN] {msg}")
                             errors.append(msg)
