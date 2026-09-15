@@ -7,6 +7,7 @@ XML / USB の順序どおりに来ることを検証する。GUI の ETA 計算�
 ベースの直近平均速度で行うため、``EtaEstimator`` を単体でテストする。
 """
 
+import hashlib
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -153,8 +154,40 @@ def test_copy_files_counts_already_copied_files_as_done(tmp_path: Path) -> None:
     calls: List[tuple] = []
     exporter._copy_files(export_dir, progress_cb=lambda *a: calls.append(a))
 
-    # 2 回目はコピーをスキップするが、進捗としては全件処理済みで報告する
-    assert calls == [(0, 1, 0, 100), (1, 1, 100, 100)]
+    # 2 回目はコピーをスキップする。件数は全件処理済みで報告するが、
+    # バイト側はスキップ分を含めない（issue #24: ETA の水増し防止）。
+    assert calls == [(0, 1, 0, 0), (1, 1, 0, 0)]
+
+
+def test_copy_files_excludes_skipped_files_from_byte_progress(tmp_path: Path) -> None:
+    """Issue #24: already-written files finish instantly, so their bytes
+    must not enter total_bytes/done_bytes — otherwise the measured copy
+    speed is inflated and the ETA reads far too short."""
+    src_skip = tmp_path / "skip.mp3"
+    src_skip.write_bytes(b"S" * 7000)
+    src_new = tmp_path / "new.mp3"
+    src_new.write_bytes(b"N" * 1000)
+    contents = [
+        FakeContent("1", "Skip", str(src_skip)),
+        FakeContent("2", "New", str(src_new)),
+    ]
+    exporter = make_exporter(FakeDb([], contents))
+    export_dir = tmp_path / "out"
+    export_dir.mkdir()
+
+    # Pre-create src_skip's destination (md5-of-source-path filename).
+    md5_hex = hashlib.md5(str(src_skip).encode("utf-8")).hexdigest()
+    (export_dir / f"{md5_hex}.mp3").write_bytes(b"old")
+
+    calls: List[tuple] = []
+    exporter._copy_files(export_dir, progress_cb=lambda *a: calls.append(a))
+
+    pending = 1000  # only the file that actually needs copying
+    assert calls[0] == (0, 2, 0, pending)
+    assert calls[-1] == (2, 2, pending, pending)
+    for _done, _tot, done_bytes, tot_bytes in calls:
+        assert tot_bytes == pending
+        assert 0 <= done_bytes <= pending
 
 
 # ----- generate_xml の進捗・フェーズ -------------------------------------------------

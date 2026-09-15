@@ -769,18 +769,22 @@ class RekordboxXMLExporter:
         # ソースの同じフォルダを連続で読む（HDD ソースでの局所性。SSD では無害）
         jobs.sort(key=lambda job: job[0])
 
-        # 進捗の分母: 総バイトはコピー対象ソースの実サイズ合計
-        total_bytes = 0
-        for _, orig, _dest, _loc, _cid, _content in jobs:
-            try:
-                total_bytes += orig.stat().st_size
-            except OSError:
-                pass
-
         existing: set = set()
         if export_dir.is_dir():
             with os.scandir(export_dir) as it:
                 existing = {e.name for e in it}
+
+        # 進捗の分母: 実際にコピーするファイルの実サイズ合計。スキップされる
+        # 既存ファイルを含めるとコピー時間ゼロでバイトだけが進み、ETA の
+        # 測定速度が水増しされる（issue #24）。
+        total_bytes = 0
+        for _, orig, dest, _loc, _cid, _content in jobs:
+            if dest.name in existing:
+                continue
+            try:
+                total_bytes += orig.stat().st_size
+            except OSError:
+                pass
 
         if progress_cb is not None:
             progress_cb(0, len(jobs), 0, total_bytes)
@@ -794,13 +798,14 @@ class RekordboxXMLExporter:
                     f"（残り {len(jobs) - processed} 件はスキップ）"
                 )
                 return
-            try:
-                done_bytes += orig.stat().st_size
-            except OSError:
-                pass
-
-            # Copy file if not already copied
+            # Copy file if not already copied. Skipped files must not add to
+            # done_bytes: their bytes would advance instantly and inflate the
+            # measured copy speed (issue #24).
             if dest.name not in existing:
+                try:
+                    done_bytes += orig.stat().st_size
+                except OSError:
+                    pass
                 try:
                     # Resolve per-track options
                     track_opts = self._track_options.get(cid, {})
