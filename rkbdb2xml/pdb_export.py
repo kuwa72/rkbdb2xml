@@ -4,6 +4,7 @@ import datetime
 import os
 import struct
 import threading
+from importlib.resources import files
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -15,45 +16,78 @@ PAGE_SIZE = 4096
 PAGE_HEADER_SIZE = 0x28
 NUM_TABLES = 20
 
+# Tables that always carry rows in a real Rekordbox export, regardless of
+# library content: 16=columns, 17/18=sort config, 19=history sync state.
+# Players reject the database when these are empty, so the pages from a
+# real export are embedded verbatim (see data/pdb_static.bin).
+STATIC_TABLES = (16, 17, 18, 19)
+_STATIC_PAGES: Optional[bytes] = None
+
+
+def _load_static_pages() -> bytes:
+    """Return the 8 pages (index+data for tables 16-19) of a real export."""
+    global _STATIC_PAGES
+    if _STATIC_PAGES is None:
+        _STATIC_PAGES = (
+            files("rkbdb2xml") / "data" / "pdb_static.bin"
+        ).read_bytes()
+    return _STATIC_PAGES
+
 
 def create_empty_pdb() -> bytes:
-    """Return a minimal valid empty `export.pdb` that `PdbEditor` can populate.
+    """Return a minimal valid `export.pdb` that `PdbEditor` can populate.
 
-    The file contains a page-0 table directory and one index page per table,
-    plus pre-reserved empty-candidate data pages.  This mirrors the layout
-    observed in real Rekordbox exports and is sufficient for `PdbEditor` to
-    allocate data pages and append rows.
+    Mirrors the layout of a real Rekordbox export: table ``i`` gets its
+    index page at ``1 + 2*i`` and a data-page slot at ``2 + 2*i``.  The
+    static tables (16-19) are pre-populated with pages captured from a
+    real export because players reject the database when they are empty.
     """
-    num_index_pages = NUM_TABLES
-    num_empty_pages = NUM_TABLES
-    total_pages = 1 + num_index_pages + num_empty_pages  # 41
+    total_pages = 1 + 2 * NUM_TABLES  # 41
     buf = bytearray(total_pages * PAGE_SIZE)
 
     # Page 0 header
     # 0x00: magic=0, 0x04: page_size, 0x08: num_tables,
-    # 0x0c: next_unused_page, 0x10: unknown=1, 0x14: sequence=1
+    # 0x0c: next_unused_page, 0x10: unknown=1, 0x14: sequence.
+    # next_unused_page points past the embedded static pages' beyond-EOF
+    # empty candidates (41..45); sequence must exceed every data page's
+    # sequence (the embedded history page carries 10).
     struct.pack_into("<IIIIII", buf, 0x00, 0, PAGE_SIZE, NUM_TABLES,
-                     total_pages, 1, 0)
-    struct.pack_into("<I", buf, 0x14, 1)
+                     46, 1, 0)
+    struct.pack_into("<I", buf, 0x14, 11)
 
-    # Table directory at 0x1c
+    # Table directory at 0x1c.  Populated tables get a beyond-EOF empty
+    # candidate like in real exports; empty tables point at their own
+    # zero-filled data slot.
+    static_empty_cands = {16: 43, 17: 44, 18: 45, 19: 41}
     for i in range(NUM_TABLES):
-        table_type = i
-        first_page = 1 + i
-        last_page = first_page
-        empty_candidate = 1 + NUM_TABLES + i
+        index_page = 1 + 2 * i
+        slot_page = 2 + 2 * i
+        if i in STATIC_TABLES:
+            first_page, last_page = index_page, slot_page
+            empty_candidate = static_empty_cands[i]
+        else:
+            first_page = last_page = index_page
+            empty_candidate = slot_page
         off = 0x1c + i * 16
-        struct.pack_into("<IIII", buf, off, table_type, empty_candidate,
+        struct.pack_into("<IIII", buf, off, i, empty_candidate,
                          first_page, last_page)
 
-    # Index pages for each table
+    static = _load_static_pages()
     for i in range(NUM_TABLES):
-        page_index = 1 + i
-        page_off = page_index * PAGE_SIZE
-        empty_candidate = 1 + NUM_TABLES + i
+        if i in STATIC_TABLES:
+            dst = (1 + 2 * i) * PAGE_SIZE
+            src = (i - STATIC_TABLES[0]) * 2 * PAGE_SIZE
+            buf[dst : dst + 2 * PAGE_SIZE] = static[src : src + 2 * PAGE_SIZE]
+            continue
 
+        page_index = 1 + 2 * i
+        page_off = page_index * PAGE_SIZE
+        slot_page = 2 + 2 * i
+
+        # Real index pages carry sequence=1 and link to their own
+        # empty-candidate slot.
         struct.pack_into("<IIIIII", buf, page_off, 0, page_index, i,
-                         empty_candidate, 0, 0)
+                         slot_page, 1, 0)
 
         # page[0x18] slot count low, [0x19-0x1a] unaligned u16,
         # [0x1b] page flags (0x64 = index, no rows)
@@ -80,7 +114,7 @@ def create_empty_pdb() -> bytes:
             struct.pack_into("<I", buf, page_off + 0x3C + e * 4,
                              0x1FFFFFF8)
 
-    # empty-candidate pages (21..40) are left zero-filled; PdbEditor will
+    # Data slots of empty tables are left zero-filled; PdbEditor will
     # initialise them when rows are first appended.
     return bytes(buf)
 

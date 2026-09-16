@@ -36,7 +36,7 @@ def collect_submodules_filtered(pkg, excludes=None):
     return [m for m in all_submodules if m not in excludes and not any(m.startswith(e + '.') for e in excludes)]
 
 
-datas = [('assets', 'assets')]
+datas = [('assets', 'assets'), ('rkbdb2xml/data', 'rkbdb2xml/data')]
 hiddenimports = ['PySide6.QtMultimedia']
 
 for pkg in packages_to_collect:
