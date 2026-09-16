@@ -83,41 +83,193 @@ def test_create_empty_pdb_is_valid() -> None:
     assert tid == 1
 
 
+STATIC_TABLES = (16, 17, 18, 19)
+
+
 def _index_page_body(data: bytes, table_index: int) -> bytes:
     """Return the index-page body (offset 0x28..) of table `table_index`."""
-    page_off = (1 + table_index) * 4096
+    page_off = (1 + 2 * table_index) * 4096
     return data[page_off + 0x28 : page_off + 4096]
 
 
+def _table_entry(data: bytes, table_index: int) -> tuple:
+    """Return (type, empty_candidate, first_page, last_page)."""
+    return struct.unpack_from("<IIII", data, 0x1C + table_index * 16)
+
+
+def _page_num_rows(data: bytes, page_index: int) -> int:
+    off = page_index * 4096
+    return data[off + 0x18] + 0x100 * (data[off + 0x19] & 1)
+
+
 def test_create_empty_pdb_index_page_layout() -> None:
-    """Index ページ本体が実機フォーマットと一致する（Issue #27）。
+    """Index ページ本体が実機フォーマットと一致する（Issue #27, #32）。
 
     実機の export.pdb では index ページの heap は
     ``[page_index, 0x03FFFFFF]`` の後に 0x03FFFFFF の magic、
     num_entries=0、first_empty=0x1fff、そして 1004 個の
     0x1FFFFFF8 空エントリが続く。欠けると Rekordbox が
     デバイス読み込み時に落ちる可能性がある。
+
+    テーブル 16-19（columns 等の静的テーブル）は実エクスポートでは
+    常にデータページを持つため、index ページの first data page は
+    sentinel ではなく実ページを指す。
     """
     data = create_empty_pdb()
     for i in range(20):
         body = _index_page_body(data, i)
         # 0x28: page_index, 0x2c: first data page or sentinel
-        assert struct.unpack_from("<I", body, 0)[0] == 1 + i
-        assert struct.unpack_from("<I", body, 4)[0] == 0x03FFFFFF
+        assert struct.unpack_from("<I", body, 0)[0] == 1 + 2 * i
+        if i in STATIC_TABLES:
+            assert struct.unpack_from("<I", body, 4)[0] == 2 + 2 * i
+        else:
+            assert struct.unpack_from("<I", body, 4)[0] == 0x03FFFFFF
         # 0x30: magic, always present in real exports
         assert struct.unpack_from("<I", body, 8)[0] == 0x03FFFFFF
-        # 0x34: zeros; 0x38: num_entries=0; 0x3a: first_empty=0x1fff
+        # 0x34: zeros; 0x38: num_entries; 0x3a: first_empty=0x1fff
         assert struct.unpack_from("<I", body, 0x0C)[0] == 0
-        assert struct.unpack_from("<H", body, 0x10)[0] == 0
+        if i == 19:
+            # 実エクスポートの history index ページはエントリを1つ持つ
+            assert struct.unpack_from("<H", body, 0x10)[0] == 1
+        else:
+            assert struct.unpack_from("<H", body, 0x10)[0] == 0
         assert struct.unpack_from("<H", body, 0x12)[0] == 0x1FFF
-        # 0x3c..: 1004 empty index entries, rest of page is zeros
-        for e in (0, 500, 1003):
+        # 0x3c..: index entries, rest of page is zeros
+        first_slot = 1 if i == 19 else 0
+        for e in (first_slot, 500, 1003):
             assert (
                 struct.unpack_from("<I", body, 0x14 + e * 4)[0]
                 == 0x1FFFFFF8
             )
         tail = body[0x14 + 1004 * 4 :]
         assert tail == bytes(len(tail))
+
+
+def test_create_empty_pdb_layout_matches_real_export() -> None:
+    """テーブル配置が実エクスポートの規則と一致する（Issue #32）。
+
+    実ファイルではテーブル i の index ページは 1+2i、
+    データページスロットは 2+2i に配置される。静的テーブル
+    （16-19）は最初からデータページを持つ。
+    """
+    data = create_empty_pdb()
+    assert len(data) == 41 * 4096
+    for i in range(20):
+        typ, empty_cand, first, last = _table_entry(data, i)
+        assert typ == i
+        assert first == 1 + 2 * i
+        if i in STATIC_TABLES:
+            assert last == 2 + 2 * i
+        else:
+            assert last == first
+            assert empty_cand == 2 + 2 * i
+        # index ページヘッダ: 実エクスポートでは sequence=1, flags=0x64
+        off = first * 4096
+        assert data[off + 0x1B] == 0x64
+        assert struct.unpack_from("<I", data, off + 0x08)[0] == i
+
+
+def test_create_empty_pdb_static_tables_populated() -> None:
+    """静的テーブル（16-19）に実エクスポート相当の行がある（Issue #32）。
+
+    実エクスポートでは columns(16)・unknown(17,18)・history(19) は
+    ライブラリ内容に関わらず常に行を持ち、空だと実機が
+    データベースを拒否する。
+    """
+    data = create_empty_pdb()
+    expected = {16: 27, 17: 22, 18: 17, 19: 2}
+    for i, nrows in expected.items():
+        _typ, _ec, _first, last = _table_entry(data, i)
+        assert _page_num_rows(data, last) == nrows, f"table {i}"
+
+
+def test_create_empty_pdb_static_rows_match_real_export() -> None:
+    """静的テーブルの行内容が実エクスポートと一致する（Issue #32）。
+
+    columns テーブルの行は Rekordbox が書き出す固定の
+    ブラウズカラム定義（"GENRE" 等）であり、ライブラリに依存しない。
+    """
+    data = create_empty_pdb()
+    _typ, _ec, _first, last = _table_entry(data, 16)
+    page = data[last * 4096 : (last + 1) * 4096]
+    assert "GENRE".encode("utf-16-le") in page
+    assert "ARTIST".encode("utf-16-le") in page
+
+
+def test_create_empty_pdb_static_pages_match_fixture() -> None:
+    """埋め込み静的ページが実エクスポート fixture と一致する（Issue #32）。
+
+    ``data/pdb_static.bin`` は Rekordbox 実機が書き出した
+    ``tests/data/rkb_one_song_export.pdb`` のテーブル 16-19 の
+    ページ（index+data）をそのまま抜き出したもの。編集・再生成で
+    実機形式からずれていないかを fixture と突き合わせる。
+    """
+    fixture = (
+        Path(__file__).parent / "data" / "rkb_one_song_export.pdb"
+    ).read_bytes()
+    data = create_empty_pdb()
+    for i in STATIC_TABLES:
+        index_page = 1 + 2 * i
+        for p in (index_page, index_page + 1):
+            assert (
+                data[p * 4096 : (p + 1) * 4096]
+                == fixture[p * 4096 : (p + 1) * 4096]
+            ), f"table {i} page {p}"
+
+
+def test_export_pdb_header_sequence_covers_all_pages(
+    usb_tree: tuple[Path, Path, Path]
+) -> None:
+    """page0 の sequence は全ページの sequence を超える（実機が検証）。
+
+    実機は ``header.sequence >= max(全ページの sequence) + 1`` を
+    要求し、満たさないと "rekordbox database not found" になる
+    （Issue #32）。
+    """
+    usb_root, _contents, dest = usb_tree
+    content = FakeContent("1", "Test Track", "/source/test.mp3")
+    content_map: Dict[str, Any] = {"1": content}
+    copy_map: Dict[str, Path] = {"/source/test.mp3": dest}
+
+    exporter = PdbExporter(FakeDb())
+    pdb_path = exporter.build(
+        usb_root=usb_root,
+        playlist_tree=[_playlist_with("1")],
+        content_map=content_map,
+        copy_map=copy_map,
+        track_options={},
+    )
+
+    data = pdb_path.read_bytes()
+    seq = struct.unpack_from("<I", data, 0x14)[0]
+    for p in range(1, len(data) // 4096):
+        page_seq = struct.unpack_from("<I", data, p * 4096 + 0x10)[0]
+        assert seq > page_seq, f"page {p} seq={page_seq} >= header={seq}"
+
+
+def test_export_pdb_static_tables_survive_build(
+    usb_tree: tuple[Path, Path, Path]
+) -> None:
+    """ビルド後も静的テーブル（16-19）の行が残る（Issue #32）。"""
+    usb_root, _contents, dest = usb_tree
+    content = FakeContent("1", "Test Track", "/source/test.mp3")
+    content_map: Dict[str, Any] = {"1": content}
+    copy_map: Dict[str, Path] = {"/source/test.mp3": dest}
+
+    exporter = PdbExporter(FakeDb())
+    pdb_path = exporter.build(
+        usb_root=usb_root,
+        playlist_tree=[_playlist_with("1")],
+        content_map=content_map,
+        copy_map=copy_map,
+        track_options={},
+    )
+
+    data = pdb_path.read_bytes()
+    for i in STATIC_TABLES:
+        _typ, _ec, _first, last = _table_entry(data, i)
+        assert _first != last, f"table {i} lost its data page"
+        assert _page_num_rows(data, last) >= 1, f"table {i} is empty"
 
 
 def test_device_pdb_xml_records_tree() -> None:
