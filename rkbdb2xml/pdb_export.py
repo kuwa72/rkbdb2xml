@@ -17,15 +17,15 @@ PAGE_HEADER_SIZE = 0x28
 NUM_TABLES = 20
 
 # Tables that always carry rows in a real Rekordbox export, regardless of
-# library content: 16=columns, 17/18=sort config, 19=history sync state.
-# Players reject the database when these are empty, so the pages from a
-# real export are embedded verbatim (see data/pdb_static.bin).
-STATIC_TABLES = (16, 17, 18, 19)
+# library content: 6=colors, 16=columns, 17/18=sort config, 19=history
+# sync state.  Players reject the database when these are empty, so the
+# pages from a real export are embedded verbatim (see data/pdb_static.bin).
+STATIC_TABLES = (6, 16, 17, 18, 19)
 _STATIC_PAGES: Optional[bytes] = None
 
 
 def _load_static_pages() -> bytes:
-    """Return the 8 pages (index+data for tables 16-19) of a real export."""
+    """Return the 10 pages (index+data for tables 6,16-19) of a real export."""
     global _STATIC_PAGES
     if _STATIC_PAGES is None:
         _STATIC_PAGES = (
@@ -39,7 +39,7 @@ def create_empty_pdb() -> bytes:
 
     Mirrors the layout of a real Rekordbox export: table ``i`` gets its
     index page at ``1 + 2*i`` and a data-page slot at ``2 + 2*i``.  The
-    static tables (16-19) are pre-populated with pages captured from a
+    static tables (6,16-19) are pre-populated with pages captured from a
     real export because players reject the database when they are empty.
     """
     total_pages = 1 + 2 * NUM_TABLES  # 41
@@ -47,18 +47,20 @@ def create_empty_pdb() -> bytes:
 
     # Page 0 header
     # 0x00: magic=0, 0x04: page_size, 0x08: num_tables,
-    # 0x0c: next_unused_page, 0x10: unknown=1, 0x14: sequence.
+    # 0x0c: next_unused_page, 0x10: unknown, 0x14: sequence.
     # next_unused_page points past the embedded static pages' beyond-EOF
     # empty candidates (41..45); sequence must exceed every data page's
-    # sequence (the embedded history page carries 10).
+    # sequence (the embedded pages carry at most 5).  The 0x10 field
+    # varies across real exports (observed 1/4/5); Rekordbox 6.8.7
+    # writes 5, matching the CDJ-3000-verified value in PIONEER.md.
     struct.pack_into("<IIIIII", buf, 0x00, 0, PAGE_SIZE, NUM_TABLES,
-                     46, 1, 0)
-    struct.pack_into("<I", buf, 0x14, 11)
+                     46, 5, 0)
+    struct.pack_into("<I", buf, 0x14, 6)
 
     # Table directory at 0x1c.  Populated tables get a beyond-EOF empty
     # candidate like in real exports; empty tables point at their own
     # zero-filled data slot.
-    static_empty_cands = {16: 43, 17: 44, 18: 45, 19: 41}
+    static_empty_cands = {6: 42, 16: 43, 17: 44, 18: 45, 19: 41}
     for i in range(NUM_TABLES):
         index_page = 1 + 2 * i
         slot_page = 2 + 2 * i
@@ -76,7 +78,7 @@ def create_empty_pdb() -> bytes:
     for i in range(NUM_TABLES):
         if i in STATIC_TABLES:
             dst = (1 + 2 * i) * PAGE_SIZE
-            src = (i - STATIC_TABLES[0]) * 2 * PAGE_SIZE
+            src = STATIC_TABLES.index(i) * 2 * PAGE_SIZE
             buf[dst : dst + 2 * PAGE_SIZE] = static[src : src + 2 * PAGE_SIZE]
             continue
 

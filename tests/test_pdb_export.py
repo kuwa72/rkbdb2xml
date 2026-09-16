@@ -83,7 +83,7 @@ def test_create_empty_pdb_is_valid() -> None:
     assert tid == 1
 
 
-STATIC_TABLES = (16, 17, 18, 19)
+STATIC_TABLES = (6, 16, 17, 18, 19)
 
 
 def _index_page_body(data: bytes, table_index: int) -> bytes:
@@ -111,8 +111,8 @@ def test_create_empty_pdb_index_page_layout() -> None:
     0x1FFFFFF8 空エントリが続く。欠けると Rekordbox が
     デバイス読み込み時に落ちる可能性がある。
 
-    テーブル 16-19（columns 等の静的テーブル）は実エクスポートでは
-    常にデータページを持つため、index ページの first data page は
+    テーブル 6,16-19（colors/columns 等の静的テーブル）は実エクスポート
+    では常にデータページを持つため、index ページの first data page は
     sentinel ではなく実ページを指す。
     """
     data = create_empty_pdb()
@@ -128,15 +128,10 @@ def test_create_empty_pdb_index_page_layout() -> None:
         assert struct.unpack_from("<I", body, 8)[0] == 0x03FFFFFF
         # 0x34: zeros; 0x38: num_entries; 0x3a: first_empty=0x1fff
         assert struct.unpack_from("<I", body, 0x0C)[0] == 0
-        if i == 19:
-            # 実エクスポートの history index ページはエントリを1つ持つ
-            assert struct.unpack_from("<H", body, 0x10)[0] == 1
-        else:
-            assert struct.unpack_from("<H", body, 0x10)[0] == 0
+        assert struct.unpack_from("<H", body, 0x10)[0] == 0
         assert struct.unpack_from("<H", body, 0x12)[0] == 0x1FFF
         # 0x3c..: index entries, rest of page is zeros
-        first_slot = 1 if i == 19 else 0
-        for e in (first_slot, 500, 1003):
+        for e in (0, 500, 1003):
             assert (
                 struct.unpack_from("<I", body, 0x14 + e * 4)[0]
                 == 0x1FFFFFF8
@@ -150,10 +145,12 @@ def test_create_empty_pdb_layout_matches_real_export() -> None:
 
     実ファイルではテーブル i の index ページは 1+2i、
     データページスロットは 2+2i に配置される。静的テーブル
-    （16-19）は最初からデータページを持つ。
+    （6,16-19）は最初からデータページを持つ。
     """
     data = create_empty_pdb()
     assert len(data) == 41 * 4096
+    # Rekordbox 6.8.7 が書き出す値（PIONEER.md の CDJ-3000 検証値も 5）
+    assert struct.unpack_from("<I", data, 0x10)[0] == 5
     for i in range(20):
         typ, empty_cand, first, last = _table_entry(data, i)
         assert typ == i
@@ -170,14 +167,14 @@ def test_create_empty_pdb_layout_matches_real_export() -> None:
 
 
 def test_create_empty_pdb_static_tables_populated() -> None:
-    """静的テーブル（16-19）に実エクスポート相当の行がある（Issue #32）。
+    """静的テーブル（6,16-19）に実エクスポート相当の行がある（Issue #32, #36）。
 
-    実エクスポートでは columns(16)・unknown(17,18)・history(19) は
-    ライブラリ内容に関わらず常に行を持ち、空だと実機が
-    データベースを拒否する。
+    実エクスポートでは colors(6)・columns(16)・unknown(17,18)・
+    history(19) はライブラリ内容に関わらず常に行を持ち、
+    空だと実機がデータベースを拒否する。
     """
     data = create_empty_pdb()
-    expected = {16: 27, 17: 22, 18: 17, 19: 2}
+    expected = {6: 8, 16: 27, 17: 22, 18: 17, 19: 1}
     for i, nrows in expected.items():
         _typ, _ec, _first, last = _table_entry(data, i)
         assert _page_num_rows(data, last) == nrows, f"table {i}"
@@ -188,6 +185,7 @@ def test_create_empty_pdb_static_rows_match_real_export() -> None:
 
     columns テーブルの行は Rekordbox が書き出す固定の
     ブラウズカラム定義（"GENRE" 等）であり、ライブラリに依存しない。
+    colors テーブルも同様に固定の8色（"Pink" 等）を持つ。
     """
     data = create_empty_pdb()
     _typ, _ec, _first, last = _table_entry(data, 16)
@@ -195,17 +193,22 @@ def test_create_empty_pdb_static_rows_match_real_export() -> None:
     assert "GENRE".encode("utf-16-le") in page
     assert "ARTIST".encode("utf-16-le") in page
 
+    _typ, _ec, _first, last = _table_entry(data, 6)
+    page = data[last * 4096 : (last + 1) * 4096]
+    assert b"Pink" in page
+    assert b"Purple" in page
+
 
 def test_create_empty_pdb_static_pages_match_fixture() -> None:
-    """埋め込み静的ページが実エクスポート fixture と一致する（Issue #32）。
+    """埋め込み静的ページが実エクスポート fixture と一致する（Issue #32, #36）。
 
-    ``data/pdb_static.bin`` は Rekordbox 実機が書き出した
-    ``tests/data/rkb_one_song_export.pdb`` のテーブル 16-19 の
+    ``data/pdb_static.bin`` は Rekordbox 6.8.7 が書き出した
+    ``tests/data/rkb6_empty_export.pdb`` のテーブル 6,16-19 の
     ページ（index+data）をそのまま抜き出したもの。編集・再生成で
     実機形式からずれていないかを fixture と突き合わせる。
     """
     fixture = (
-        Path(__file__).parent / "data" / "rkb_one_song_export.pdb"
+        Path(__file__).parent / "data" / "rkb6_empty_export.pdb"
     ).read_bytes()
     data = create_empty_pdb()
     for i in STATIC_TABLES:
