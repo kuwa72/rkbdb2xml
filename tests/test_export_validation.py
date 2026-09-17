@@ -105,7 +105,7 @@ class FakeDbWithAnlz(FakeDb):
     def get_anlz_paths(self, content: Any) -> Dict[str, Any]:
         return {
             "DAT": DATA_DIR / "rkb5_anlz.dat",
-            "EXT": None,
+            "EXT": DATA_DIR / "rkb5_anlz.ext",
             "2EX": None,
         }
 
@@ -268,6 +268,11 @@ def test_copied_anlz_parses_and_has_usb_path(tmp_path: Path) -> None:
     af = AnlzFile.parse_file(str(anlz_file))
     assert af.get("PPTH") == track.file_path
 
+    # .EXT も同じディレクトリに書き換えつきでコピーされる
+    ext_file = anlz_file.with_suffix(".EXT")
+    assert ext_file.exists()
+    assert AnlzFile.parse_file(str(ext_file)).get("PPTH") == track.file_path
+
     # Kaitai 側でもタグ連鎖が最後まで辿れる
     RekordboxAnlz(KaitaiStream(BytesIO(anlz_file.read_bytes())))
 
@@ -280,3 +285,151 @@ def test_rewrite_anlz_path_real_fixture(tmp_path: Path) -> None:
     new_path = "/Contents/rewritten_track.mp3"
     assert rewrite_anlz_path(DATA_DIR / "rkb5_anlz.dat", dst, new_path)
     assert AnlzFile.parse_file(str(dst)).get("PPTH") == new_path
+
+
+def _walk_anlz_tags(data: bytes) -> list:
+    """ANLZ のタグ連鎖を生バイトで辿り、終端が len_file と一致するか
+    検証してタグ名のリストを返す。"""
+    assert data[0:4] == b"PMAI"
+    len_header = int.from_bytes(data[4:8], "big")
+    len_file = int.from_bytes(data[8:12], "big")
+    pos = len_header
+    tags = []
+    while pos < len_file:
+        tags.append(data[pos : pos + 4])
+        len_tag = int.from_bytes(data[pos + 8 : pos + 12], "big")
+        assert len_tag > 0 and pos + len_tag <= len_file
+        pos += len_tag
+    assert pos == len_file <= len(data)
+    return tags
+
+
+def test_real_ext_structure_and_rewrite(tmp_path: Path) -> None:
+    """実 Rekordbox 製 ANLZ .EXT がタグ連鎖として整合し、
+    バイトレベルの PPTH 書き換え後も両パーサーで読める。"""
+    from pyrekordbox.anlz import AnlzFile
+
+    ext = DATA_DIR / "rkb5_anlz.ext"
+    tags = _walk_anlz_tags(ext.read_bytes())
+    assert b"PPTH" in tags
+    af = AnlzFile.parse_file(str(ext))
+    assert af.get("PPTH")
+
+    dst = tmp_path / "out.EXT"
+    new_path = "/Contents/rewritten_track.mp3"
+    assert rewrite_anlz_path(ext, dst, new_path)
+    assert AnlzFile.parse_file(str(dst)).get("PPTH") == new_path
+    assert _walk_anlz_tags(dst.read_bytes()) == tags
+
+
+# ----- 周辺ファイル -------------------------------------------------------
+
+
+def test_device_settings_written(tmp_path: Path) -> None:
+    """旧世代プレイヤーが読む DEVSETTING/MYSETTING が生成される。"""
+    from importlib.resources import files
+
+    build_export(tmp_path / "usb")
+    pioneer = tmp_path / "usb" / "PIONEER"
+    for name in ("DEVSETTING.DAT", "MYSETTING.DAT", "MYSETTING2.DAT"):
+        f = pioneer / name
+        assert f.exists(), name
+        assert f.read_bytes() == (
+            files("rkbdb2xml") / "data" / name
+        ).read_bytes()
+
+
+def test_device_settings_not_overwritten(tmp_path: Path) -> None:
+    """プレイヤー/Rekordbox が管理する既存の設定ファイルは上書きしない。"""
+    usb = tmp_path / "usb"
+    marker = usb / "PIONEER" / "MYSETTING.DAT"
+    marker.parent.mkdir(parents=True)
+    marker.write_bytes(b"player-managed")
+    build_export(usb)
+    assert marker.read_bytes() == b"player-managed"
+
+
+# ----- RB5 プロファイルと多ページ -----------------------------------------
+
+
+def test_track_rows_use_rb5_profile(tmp_path: Path) -> None:
+    """CDJ-350/800 世代向けに、トラック行は RB5 エクスポートの定数を持つ
+    （実測: rkb5_one_track_export.pdb と同じ値）。"""
+    db = Database.from_file(build_export(tmp_path / "usb"))
+    track = db.tracks[0]
+    assert track.bitmask == 0x00000700
+    assert track.strings[2] == "1"      # unknown_string_2
+    assert track.strings[3] == "\x01"   # unknown_string_3
+    assert track.strings[6] == ""       # kuvo_public（RB5 では空）
+    assert track.strings[7] == "ON"     # autoload_hotcues
+
+
+def _table_pages(path: Path, table_type: int) -> list:
+    """指定テーブルのページチェーンに属する Page オブジェクトを返す。"""
+    pdb = RekordboxPdb(False, KaitaiStream(BytesIO(path.read_bytes())))
+    table = next(t for t in pdb.tables if int(t.type) == table_type)
+    ref = table.first_page
+    pages = []
+    seen = set()
+    while ref.index != 0xFFFFFFFF and ref.index not in seen:
+        seen.add(ref.index)
+        pages.append(ref.body)
+        if ref.index == table.last_page.index:
+            break
+        ref = pages[-1].next_page
+    return pages
+
+
+def test_multi_page_export(tmp_path: Path) -> None:
+    """テーブルが複数データページに跨る規模でも構造が保たれる。
+
+    300 トラックをフォルダ配下の 3 プレイリストに分散させ、ページ
+    チェーン・行パース・playlist 参照のすべてが独立パーサーで
+    成立することを確認する。
+    """
+    n_tracks = 300
+    usb = tmp_path / "usb"
+    contents = usb / "Contents"
+    contents.mkdir(parents=True)
+
+    folder = DevicePdbNode("Root", is_folder=True)
+    playlists = [folder.add_playlist(f"PL{i}") for i in range(3)]
+    content_map: Dict[str, Any] = {}
+    copy_map: Dict[str, Path] = {}
+    for i in range(n_tracks):
+        cid = str(i + 1)
+        src = f"/src/{i:03d}.mp3"
+        dest = contents / f"t{i:03d}.mp3"
+        dest.write_bytes(b"x")
+        content_map[cid] = FakeContent(cid, f"Track {i:03d}", src)
+        copy_map[src] = dest
+        playlists[i % 3].add_track(cid)
+
+    pdb_path = PdbExporter(FakeDb()).build(
+        usb_root=usb,
+        playlist_tree=[folder],
+        content_map=content_map,
+        copy_map=copy_map,
+        track_options={},
+    )
+
+    counts = walk_pdb(pdb_path)
+    assert counts[0] == n_tracks            # tracks
+    assert counts[8] == n_tracks            # playlist_entries
+    assert counts[7] == 4                   # folder + 3 playlists
+
+    # tracks / playlist_entries は複数データページに跨るはず
+    for t in (0, 8):
+        data_pages = [p for p in _table_pages(pdb_path, t)
+                      if p.is_data_page]
+        assert len(data_pages) > 1, f"table {t} did not spill pages"
+
+    # 書き込み側パーサーでも全行が読み戻せる
+    db = Database.from_file(pdb_path)
+    assert len(db.tracks) == n_tracks
+    assert len(db.playlist_entries) == n_tracks
+    by_pl: Dict[int, int] = {}
+    for e in db.playlist_entries:
+        assert e.track_id in {t.id for t in db.tracks}
+        by_pl[e.playlist_id] = by_pl.get(e.playlist_id, 0) + 1
+    assert sorted(by_pl.values()) == [100, 100, 100]

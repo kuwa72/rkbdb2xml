@@ -48,4 +48,4 @@ jobs:
           mvn -q -B compile
           mvn -q -B org.codehaus.mojo:exec-maven-plugin:3.5.0:java \
             -Dexec.mainClass=ValidateExport \
-            -Dexec.args="/tmp/usb/PIONEER/rekordbox/export.pdb 2 1"
+            -Dexec.args="/tmp/usb/PIONEER/rekordbox/export.pdb 120 3"
