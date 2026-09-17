@@ -25,6 +25,14 @@ from rkbdb2xml.anlz import (
             0x00A,
             0x0000CC9C,
         ),
+        # Rekordbox 5.8.6 実エクスポート由来（非BMP文字 = サロゲートペアを
+        # 含むパス）。Rekordbox は UTF-16 コードユニット単位でハッシュ
+        # するため、コードポイント単位の実装では一致しない（Issue #40）
+        (
+            "/Contents/Yakumo/新しいフォルダー (７)/01 ·̩͙_+. ̊☽ 𝙨𝙞𝙜𝙣𝙖𝙡：𝟮𝟬𝟬𝙓 ☾.m4a",
+            0x055,
+            0x00014649,
+        ),
     ],
 )
 def test_anlz_path_hash_verified_cases(
