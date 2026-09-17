@@ -502,7 +502,12 @@ class PdbExporter:
                 2,
                 0,
             ),
-            "rating": self._clip_int(getattr(content, "Rating", 0), 1, 0),
+            # DjmdContent.Rating は XML と同じ 0-255 スケール
+            # (51刻み)。DeviceSQL の rating は 0-5 星なので換算する。
+            # 実機 RB5.8.7 フィクスチャ (sc08) で検証済み。
+            "rating": self._clip_int(
+                self._rating_to_stars(getattr(content, "Rating", 0)),
+                1, 0),
             "color_id": self._clip_int(getattr(content, "ColorID", 0), 1, 0),
             "artwork_id": 0,
         }
@@ -527,6 +532,15 @@ class PdbExporter:
             return v if v >= 0 else default
         except (ValueError, TypeError):
             return default
+
+    @staticmethod
+    def _rating_to_stars(value: Any) -> int:
+        """DjmdContent の 0-255 Rating を DeviceSQL の 0-5 星に換算する。"""
+        try:
+            r = int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+        return r // 51 if r > 5 else r
 
     @staticmethod
     def _clip_int(value: Any, size: int, default: int = 0) -> int:
