@@ -1,0 +1,122 @@
+{
+  "SC01_one_ascii": [
+    "SC01 one_ascii"
+  ],
+  "SC02_japanese": [
+    "SC02 japanese"
+  ],
+  "SC03_long_strings": [
+    "SC03 long_strings"
+  ],
+  "SC04_special_chars": [
+    "SC04 special_chars"
+  ],
+  "SC05_many_tracks": [
+    "SC05 many_tracks"
+  ],
+  "SC06_nested_playlists": [
+    "SC06 depth1",
+    "SC06 depth2",
+    "SC06 depth3",
+    "SC06 depth4"
+  ],
+  "SC07_many_playlists": [
+    "SC07 pl 00",
+    "SC07 pl 01",
+    "SC07 pl 02",
+    "SC07 pl 03",
+    "SC07 pl 04",
+    "SC07 pl 05",
+    "SC07 pl 06",
+    "SC07 pl 07",
+    "SC07 pl 08",
+    "SC07 pl 09",
+    "SC07 pl 10",
+    "SC07 pl 11",
+    "SC07 pl 12",
+    "SC07 pl 13",
+    "SC07 pl 14",
+    "SC07 pl 15",
+    "SC07 pl 16",
+    "SC07 pl 17",
+    "SC07 pl 18",
+    "SC07 pl 19",
+    "SC07 pl 20",
+    "SC07 pl 21",
+    "SC07 pl 22",
+    "SC07 pl 23",
+    "SC07 pl 24",
+    "SC07 pl 25",
+    "SC07 pl 26",
+    "SC07 pl 27",
+    "SC07 pl 28",
+    "SC07 pl 29",
+    "SC07 pl 30",
+    "SC07 pl 31",
+    "SC07 pl 32",
+    "SC07 pl 33",
+    "SC07 pl 34",
+    "SC07 pl 35",
+    "SC07 pl 36",
+    "SC07 pl 37",
+    "SC07 pl 38",
+    "SC07 pl 39",
+    "SC07 pl 40",
+    "SC07 pl 41",
+    "SC07 pl 42",
+    "SC07 pl 43",
+    "SC07 pl 44",
+    "SC07 pl 45",
+    "SC07 pl 46",
+    "SC07 pl 47",
+    "SC07 pl 48",
+    "SC07 pl 49",
+    "SC07 pl 50",
+    "SC07 pl 51",
+    "SC07 pl 52",
+    "SC07 pl 53",
+    "SC07 pl 54",
+    "SC07 pl 55",
+    "SC07 pl 56",
+    "SC07 pl 57",
+    "SC07 pl 58",
+    "SC07 pl 59",
+    "SC07 pl 60",
+    "SC07 pl 61",
+    "SC07 pl 62",
+    "SC07 pl 63",
+    "SC07 pl 64",
+    "SC07 pl 65",
+    "SC07 pl 66",
+    "SC07 pl 67",
+    "SC07 pl 68",
+    "SC07 pl 69",
+    "SC07 pl 70",
+    "SC07 pl 71",
+    "SC07 pl 72",
+    "SC07 pl 73",
+    "SC07 pl 74",
+    "SC07 pl 75",
+    "SC07 pl 76",
+    "SC07 pl 77",
+    "SC07 pl 78",
+    "SC07 pl 79"
+  ],
+  "SC08_ratings_keys_colors": [
+    "SC08 ratings_keys_colors"
+  ],
+  "SC09_file_types": [
+    "SC09 file_types"
+  ],
+  "SC10_bpm": [
+    "SC10 bpm"
+  ],
+  "SC11_artwork": [
+    "SC11 artwork"
+  ],
+  "SC12_misc": [
+    "SC12 empty",
+    "SC12 dup refs",
+    "SC12 no artist"
+  ]
+}

@@ -11,13 +11,14 @@
 |---|---|
 | Rekordbox | 5.8.7（`C:\Program Files\Pioneer\rekordbox 5.8.7`） |
 | 出力先 | 実 USB メモリ（FAT32、KIOXIA TransMemory） |
-| 入力 | `scripts/gen_fixture_input.py` が生成した音声 + rekordbox XML |
+| 入力 | `scripts/gen_fixture_input.py` が生成した音声 + rekordbox XML（`tests/data/fixture_input/` に保存済み） |
 | 回収 | `scripts/capture_usb_fixture.py /mnt/f <name>` |
 
 生成手順の概要:
 
 1. `gen_fixture_input.py` で 621 トラック・96 プレイリスト・12 シナリオの
-   音声ファイルと rekordbox XML を生成（Windows 側は `C:\rkb-fixtures`）
+   音声ファイルと rekordbox XML を生成（生成物は `tests/data/fixture_input/`
+   にコミット済み。実機へ読ませるときは Windows 側 `C:\rkb-fixtures` 等に置く）
 2. Rekordbox 5.8.7 の「rekordbox xml」ブリッジで XML を読み込み、
    コレクションへインポート → 解析
 3. シナリオのフォルダを右クリック →「フォルダをエクスポート」→ USB
@@ -68,7 +69,7 @@
 | `rkb587_sc10_bpm` | 5 | BPM 境界値。0.00 / 60.00 / 128.50 / 200.99 / 999.00 |
 | `rkb587_sc11_artwork` | 4 | アートワーク付き（jpg/png）+ なし。`PIONEER/Artwork/` に実画像あり |
 | `rkb587_sc12_misc` | 3 | 空プレイリスト・同一トラック重複参照（playlist entries=4/track=3）・アーティスト空 |
-| `rkb587_all_scenarios` | 620 | 上記全シナリオ + トップレベル単独 SC01 プレイリスト + 空の「無題のリスト」×3 を一括エクスポートしたもの。最大規模 |
+| `rkb587_all_scenarios` | 621 | 上記全シナリオ + トップレベル単独 SC01 プレイリスト + 空の「無題のリスト」×3 を一括エクスポートしたもの。最大規模 |
 
 シナリオ → プレイリスト名の対応は `scenarios.json` を参照
 （`gen_fixture_input.py` が出力したものと同一）。
