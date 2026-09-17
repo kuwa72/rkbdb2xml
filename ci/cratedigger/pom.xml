@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>rkbdb2xml</groupId>
+  <artifactId>cratedigger-validation</artifactId>
+  <version>1.0-SNAPSHOT</version>
+  <packaging>jar</packaging>
+
+  <properties>
+    <maven.compiler.source>11</maven.compiler.source>
+    <maven.compiler.target>11</maven.compiler.target>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+  </properties>
+
+  <dependencies>
+    <!-- Independent DeviceSQL/ANLZ parser used by Beat Link; parses the
+         same files real CDJs read, so it acts as a picky external
+         validator for our generated export.pdb. -->
+    <dependency>
+      <groupId>org.deepsymmetry</groupId>
+      <artifactId>crate-digger</artifactId>
+      <version>0.2.1</version>
+    </dependency>
+  </dependencies>
+</project>
