@@ -128,13 +128,17 @@ def test_create_empty_pdb_index_page_layout() -> None:
         assert struct.unpack_from("<I", body, 8)[0] == 0x03FFFFFF
         # 0x34: zeros; 0x38: num_entries; 0x3a: first_empty=0x1fff
         assert struct.unpack_from("<I", body, 0x0C)[0] == 0
-        assert struct.unpack_from("<H", body, 0x10)[0] == 0
+        # Rekordbox 5.8.7 実測: history (t19) の index ページのみ
+        # エントリを1件持つ (0x143)。他は全て空。
+        num_entries = 1 if i == 19 else 0
+        assert struct.unpack_from("<H", body, 0x10)[0] == num_entries
         assert struct.unpack_from("<H", body, 0x12)[0] == 0x1FFF
         # 0x3c..: index entries, rest of page is zeros
         for e in (0, 500, 1003):
+            expected = 0x143 if (i == 19 and e == 0) else 0x1FFFFFF8
             assert (
                 struct.unpack_from("<I", body, 0x14 + e * 4)[0]
-                == 0x1FFFFFF8
+                == expected
             )
         tail = body[0x14 + 1004 * 4 :]
         assert tail == bytes(len(tail))
@@ -149,8 +153,8 @@ def test_create_empty_pdb_layout_matches_real_export() -> None:
     """
     data = create_empty_pdb()
     assert len(data) == 41 * 4096
-    # Rekordbox 6.8.7 が書き出す値（PIONEER.md の CDJ-3000 検証値も 5）
-    assert struct.unpack_from("<I", data, 0x10)[0] == 5
+    # Rekordbox 5.8.7 の全14エクスポートフィクスチャが書き出す値
+    assert struct.unpack_from("<I", data, 0x10)[0] == 1
     for i in range(20):
         typ, empty_cand, first, last = _table_entry(data, i)
         assert typ == i
@@ -174,7 +178,10 @@ def test_create_empty_pdb_static_tables_populated() -> None:
     空だと実機がデータベースを拒否する。
     """
     data = create_empty_pdb()
-    expected = {6: 8, 16: 27, 17: 22, 18: 17, 19: 1}
+    # t19 (history) の num_rows はエクスポート毎に増える削除済み
+    # スロットを含む。埋め込み blob は最も履歴の浅い
+    # rkb587_sc01_one_ascii 由来 (num_rows=2)。
+    expected = {6: 8, 16: 27, 17: 21, 18: 17, 19: 2}
     for i, nrows in expected.items():
         _typ, _ec, _first, last = _table_entry(data, i)
         assert _page_num_rows(data, last) == nrows, f"table {i}"
@@ -202,13 +209,16 @@ def test_create_empty_pdb_static_rows_match_real_export() -> None:
 def test_create_empty_pdb_static_pages_match_fixture() -> None:
     """埋め込み静的ページが実エクスポート fixture と一致する（Issue #32, #36）。
 
-    ``data/pdb_static.bin`` は Rekordbox 6.8.7 が書き出した
-    ``tests/data/rkb6_empty_export.pdb`` のテーブル 6,16-19 の
-    ページ（index+data）をそのまま抜き出したもの。編集・再生成で
-    実機形式からずれていないかを fixture と突き合わせる。
+    ``data/pdb_static.bin`` は Rekordbox 5.8.7 が書き出した
+    ``tests/data/usb_fixtures/rkb587_sc01_one_ascii`` のテーブル
+    6,16-19 のページ（index+data）をそのまま抜き出したもの。
+    編集・再生成で実機形式からずれていないかを fixture と
+    突き合わせる。
     """
     fixture = (
-        Path(__file__).parent / "data" / "rkb6_empty_export.pdb"
+        Path(__file__).parent / "data" / "usb_fixtures"
+        / "rkb587_sc01_one_ascii" / "PIONEER" / "rekordbox"
+        / "export.pdb"
     ).read_bytes()
     data = create_empty_pdb()
     for i in STATIC_TABLES:
