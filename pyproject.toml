@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rkbdb2xml"
-version = "0.8.9"
+version = "0.8.10"
 description = "Rekordbox のプレイリストを XML エクスポート・楽曲変換する GUI ツール"
 readme = "README.md"
 authors = [
@@ -17,7 +17,8 @@ classifiers = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "pyrekordbox>=0.4.0",
+    # 0.4.4 で KeyExtractor が削除されたためそれ未満に固定
+    "pyrekordbox>=0.4.0,<0.4.4",
     "PySide6>=6.5.0",
     "mutagen>=1.47.0",
     "romann>=0.3.0",
