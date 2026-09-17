@@ -21,8 +21,9 @@ def anlz_path_hash(file_path: str) -> Tuple[int, int]:
         (p_value, hash_value) used for the ANLZ folder name.
     """
     hash_val = 0
-    for char in file_path:
-        c = ord(char) & 0xFFFF
+    utf16 = file_path.encode("utf-16-le")
+    for i in range(0, len(utf16), 2):
+        c = int.from_bytes(utf16[i : i + 2], "little")
         temp = (hash_val * 0x5BC9 + c) & 0xFFFFFFFF
         hash_val = (temp * 0x93B5 + c) & 0xFFFFFFFF
     hash_result = hash_val % 200003  # 0x30D43
