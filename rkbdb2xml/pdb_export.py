@@ -23,6 +23,13 @@ NUM_TABLES = 20
 STATIC_TABLES = (6, 16, 17, 18, 19)
 _STATIC_PAGES: Optional[bytes] = None
 
+# Files Rekordbox writes next to export.pdb on every export.  Old players
+# (CDJ-350/800 era) read DEVSETTING/MYSETTING at mount time, so an export
+# created from scratch should carry them.  They are generic blobs captured
+# from a real Rekordbox 5.8.6 export (no user-specific data), and are only
+# written when missing so a player's own settings are never clobbered.
+DEVICE_SETTING_FILES = ("DEVSETTING.DAT", "MYSETTING.DAT", "MYSETTING2.DAT")
+
 
 def _load_static_pages() -> bytes:
     """Return the 10 pages (index+data for tables 6,16-19) of a real export."""
@@ -161,10 +168,14 @@ class DevicePdbXml:
 class PdbExporter:
     """Build a CDJ-compatible `export.pdb` and copy ANLZ analysis data."""
 
-    def __init__(self, db: Any, verbose: bool = False) -> None:
+    def __init__(self, db: Any, verbose: bool = False,
+                 pdb_profile: str = "rb5") -> None:
         self.db = db
         self._verbose = verbose
         self._roman_converter: Optional[Any] = None
+        # Track-row constants differ between Rekordbox generations; the
+        # "rb5" values match players of the CDJ-350/800 era.
+        self._pdb_profile = pdb_profile
 
     def verbose(self, message: str) -> None:
         if self._verbose:
@@ -280,7 +291,8 @@ class PdbExporter:
                             content, usb_path
                         )
                         try:
-                            pdb_track_id = ed.add_track(**metadata)
+                            pdb_track_id = ed.add_track(
+                                **metadata, profile=self._pdb_profile)
                         except Exception as e:
                             msg = f"add_track({content_id}, title={metadata.get('title')!r}): {e}"
                             self.verbose(f"[WARN] {msg}")
@@ -338,6 +350,20 @@ class PdbExporter:
             f"(playlists={len(ed.db.playlist_tree)}, "
             f"tracks={len(track_id_map)})"
         )
+
+        # Rekordbox 純正のエクスポートが置く設定ファイルを補完する。
+        # 既存のものはプレイヤー/Rekordbox が管理する値なので上書きしない。
+        pioneer_dir = usb_root / "PIONEER"
+        for name in DEVICE_SETTING_FILES:
+            dst = pioneer_dir / name
+            if dst.exists():
+                continue
+            try:
+                dst.write_bytes(
+                    (files("rkbdb2xml") / "data" / name).read_bytes()
+                )
+            except Exception as e:
+                self.verbose(f"[WARN] {name} の書き込みに失敗: {e}")
 
         if phase_cb is not None:
             phase_cb("ANLZ 解析データコピー中")

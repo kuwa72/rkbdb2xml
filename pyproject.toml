@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "rkbdb2xml"
-version = "0.8.11"
+version = "0.9.0"
 description = "Rekordbox のプレイリストを XML エクスポート・楽曲変換する GUI ツール"
 readme = "README.md"
 authors = [
@@ -24,7 +24,7 @@ dependencies = [
     "romann>=0.3.0",
     "psutil>=5.9.0",
     # フォーク（性能修正）: fragmede/rekordbox-pdb@ee3bac2 に再パース回避パッチを適用した私家版
-    "rekordbox-pdb @ git+https://github.com/kuwa72/rekordbox-pdb.git@b1cdd52d66ac393fa9d90a8b45a3a036317a3b77",
+    "rekordbox-pdb @ git+https://github.com/kuwa72/rekordbox-pdb.git@ae9b2a90902423b4d471827aef7b59285ce2adc8",
 ]
 
 [project.urls]
@@ -38,7 +38,7 @@ dependencies = [
 packages = ["rkbdb2xml"]
 
 [tool.setuptools.package-data]
-rkbdb2xml = ["data/*.bin"]
+rkbdb2xml = ["data/*.bin", "data/*.DAT"]
 
 [flake8]
 ignore = ["E203", "E501"]

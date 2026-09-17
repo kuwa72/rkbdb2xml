@@ -2,6 +2,8 @@
 
 実機検証ツール（crate-digger 等）に渡すための PIONEER/ ツリーを
 ``PdbExporter`` で作る。Rekordbox 本体・実データベースは不要。
+tracks/playlist_entries テーブルが複数データページに跨る規模にして、
+ページチェーン系の破損も検出できるようにする。
 
 Usage:
     python scripts/gen_sample_export.py <output_dir>
@@ -14,6 +16,9 @@ from typing import Any, Dict
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from rkbdb2xml.pdb_export import DevicePdbNode, PdbExporter  # noqa: E402
+
+N_TRACKS = 120
+N_PLAYLISTS = 3
 
 
 class _FakeDb:
@@ -46,25 +51,28 @@ def main() -> None:
     usb_root = Path(sys.argv[1])
     contents = usb_root / "Contents"
     contents.mkdir(parents=True)
-    dest_a = contents / "track_a.mp3"
-    dest_b = contents / "track_b.mp3"
-    dest_a.write_bytes(b"audio a")
-    dest_b.write_bytes(b"audio b")
 
     folder = DevicePdbNode("Root", is_folder=True)
-    playlist = folder.add_playlist("Playlist")
-    playlist.add_track("1")
-    playlist.add_track("2")
+    playlists = [
+        folder.add_playlist(f"Playlist {i}") for i in range(N_PLAYLISTS)
+    ]
+    content_map: Dict[str, Any] = {}
+    copy_map: Dict[str, Path] = {}
+    for i in range(N_TRACKS):
+        cid = str(i + 1)
+        src = f"/src/{i:03d}.mp3"
+        dest = contents / f"track_{i:03d}.mp3"
+        dest.write_bytes(b"audio")
+        content_map[cid] = _FakeContent(cid, f"Track {i:03d}", src)
+        copy_map[src] = dest
+        playlists[i % N_PLAYLISTS].add_track(cid)
 
     exporter = PdbExporter(_FakeDb())
     pdb_path = exporter.build(
         usb_root=usb_root,
         playlist_tree=[folder],
-        content_map={
-            "1": _FakeContent("1", "Track One", "/src/a.mp3"),
-            "2": _FakeContent("2", "Track Two", "/src/b.mp3"),
-        },
-        copy_map={"/src/a.mp3": dest_a, "/src/b.mp3": dest_b},
+        content_map=content_map,
+        copy_map=copy_map,
         track_options={},
     )
     print(pdb_path)

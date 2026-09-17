@@ -89,4 +89,4 @@ wrapt==1.17.2
 zstandard==0.23.0
 # フォーク: fragmede/rekordbox-pdb に性能修正（行追加毎の全再パース回避）を加えた私家版
 # 元: git+https://github.com/fragmede/rekordbox-pdb.git@ee3bac2f22ca11a5ce61eea35f8cb951c246eaef
-git+https://github.com/kuwa72/rekordbox-pdb.git@b1cdd52d66ac393fa9d90a8b45a3a036317a3b77
+git+https://github.com/kuwa72/rekordbox-pdb.git@ae9b2a90902423b4d471827aef7b59285ce2adc8
