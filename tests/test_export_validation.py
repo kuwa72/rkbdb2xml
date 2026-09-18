@@ -7,8 +7,9 @@ Deep-Symmetry/crate-digger の ``rekordbox_pdb.ksy`` /
 同プロジェクトが実機上のエクスポートを日々パースしている実績の
 ある文法）から ``scripts/gen_kaitai_parsers.mjs`` で生成したもの。
 
-fixture の rkb5_*.pdb / rkb5_anlz.dat は Rekordbox 5.8.6 が
-実際に書き出した USB エクスポート（空 / 1曲 / 複数プレイリスト）。
+fixture は ``tests/data/usb_fixtures/`` 配下の Rekordbox 5.8.7 が
+実際に書き出した USB エクスポート、および同フィクスチャ由来の
+ANLZ ファイル（rkb587_anlz.dat / .ext）。
 """
 
 import importlib.util
@@ -46,18 +47,26 @@ RekordboxAnlz = _load_kaitai_module("rekordbox_anlz").RekordboxAnlz
 
 DATA_DIR = Path(__file__).parent / "data"
 
+def _fixture_pdb(name: str) -> Path:
+    return (
+        DATA_DIR / "usb_fixtures" / name / "PIONEER" / "rekordbox"
+        / "export.pdb"
+    )
+
+
 REAL_EXPORTS = [
-    DATA_DIR / "rkb5_empty_export.pdb",
-    DATA_DIR / "rkb5_one_track_export.pdb",
-    DATA_DIR / "rkb5_multi_playlist_export.pdb",
-    DATA_DIR / "rkb6_empty_export.pdb",
-    DATA_DIR / "rkb_one_song_export.pdb",
+    _fixture_pdb("rkb587_empty"),
+    _fixture_pdb("rkb587_sc01_one_ascii"),
+    _fixture_pdb("rkb587_sc02_japanese"),
+    _fixture_pdb("rkb587_sc05_many_tracks"),
+    _fixture_pdb("rkb587_all_scenarios"),
 ]
 
 # Rekordbox がライブラリ内容に関わらず常に書く静的テーブル
 # (colors / columns / sort / history)。実機はこれらが空だと
 # データベースを拒否する (Issue #32, #36)。
-STATIC_TABLE_ROWS = {6: 8, 16: 27, 17: 22, 18: 17, 19: 1}
+# 行数は Rekordbox 5.8.7 エクスポートの実測値。
+STATIC_TABLE_ROWS = {6: 8, 16: 27, 17: 21, 18: 17, 19: 1}
 
 PAGE_SIZE = 4096
 
@@ -100,12 +109,12 @@ class FakeDb:
 
 
 class FakeDbWithAnlz(FakeDb):
-    """全トラックに実 Rekordbox 5.8.6 製の ANLZ fixture を紐付ける。"""
+    """全トラックに実 Rekordbox 5.8.7 製の ANLZ fixture を紐付ける。"""
 
     def get_anlz_paths(self, content: Any) -> Dict[str, Any]:
         return {
-            "DAT": DATA_DIR / "rkb5_anlz.dat",
-            "EXT": DATA_DIR / "rkb5_anlz.ext",
+            "DAT": DATA_DIR / "rkb587_anlz.dat",
+            "EXT": DATA_DIR / "rkb587_anlz.ext",
             "2EX": None,
         }
 
@@ -179,7 +188,7 @@ def test_generated_pdb_parses_with_kaitai(tmp_path: Path) -> None:
 def test_generated_pdb_header_invariants(tmp_path: Path) -> None:
     """page0 の sequence が全ページをカバーし unk10 は実機値。"""
     data = build_export(tmp_path / "usb").read_bytes()
-    assert struct.unpack_from("<I", data, 0x10)[0] == 5
+    assert struct.unpack_from("<I", data, 0x10)[0] == 1
     seq = struct.unpack_from("<I", data, 0x14)[0]
     for p in range(1, len(data) // PAGE_SIZE):
         page_seq = struct.unpack_from("<I", data, p * PAGE_SIZE + 0x10)[0]
@@ -198,14 +207,14 @@ def test_generated_pdb_header_invariants(tmp_path: Path) -> None:
 
 def test_generated_pdb_matches_real_export_tables(tmp_path: Path) -> None:
     """実 Rekordbox エクスポートと同じ静的テーブル構成を持つ。"""
-    real = walk_pdb(DATA_DIR / "rkb5_one_track_export.pdb")
+    real = walk_pdb(_fixture_pdb("rkb587_sc01_one_ascii"))
     generated = walk_pdb(build_export(tmp_path / "usb"))
     for table in STATIC_TABLE_ROWS:
         assert table in generated, f"missing static table {table}"
         assert table in real
         # colors/columns 等の行数は Rekordbox バージョンで変わるので
         # 実エクスポート側は「存在する」ことだけを確認する
-    # 生成側の静的行数は埋め込み blob (6.8.7 由来) と一致する
+    # 生成側の静的行数は埋め込み blob (5.8.7 由来) と一致する
     for table, nrows in STATIC_TABLE_ROWS.items():
         assert generated[table] == nrows
 
@@ -241,7 +250,7 @@ def test_real_anlz_parses_with_kaitai_and_pyrekordbox() -> None:
     """実 Rekordbox 製 ANLZ が両パーサーで読める（パーサー健全性）。"""
     from pyrekordbox.anlz import AnlzFile
 
-    dat = DATA_DIR / "rkb5_anlz.dat"
+    dat = DATA_DIR / "rkb587_anlz.dat"
     anlz = RekordboxAnlz(KaitaiStream(BytesIO(dat.read_bytes())))
     assert len(anlz.sections) > 0
     af = AnlzFile.parse_file(str(dat))
@@ -283,7 +292,7 @@ def test_rewrite_anlz_path_real_fixture(tmp_path: Path) -> None:
 
     dst = tmp_path / "out.DAT"
     new_path = "/Contents/rewritten_track.mp3"
-    assert rewrite_anlz_path(DATA_DIR / "rkb5_anlz.dat", dst, new_path)
+    assert rewrite_anlz_path(DATA_DIR / "rkb587_anlz.dat", dst, new_path)
     assert AnlzFile.parse_file(str(dst)).get("PPTH") == new_path
 
 
@@ -309,7 +318,7 @@ def test_real_ext_structure_and_rewrite(tmp_path: Path) -> None:
     バイトレベルの PPTH 書き換え後も両パーサーで読める。"""
     from pyrekordbox.anlz import AnlzFile
 
-    ext = DATA_DIR / "rkb5_anlz.ext"
+    ext = DATA_DIR / "rkb587_anlz.ext"
     tags = _walk_anlz_tags(ext.read_bytes())
     assert b"PPTH" in tags
     af = AnlzFile.parse_file(str(ext))
@@ -354,7 +363,7 @@ def test_device_settings_not_overwritten(tmp_path: Path) -> None:
 
 def test_track_rows_use_rb5_profile(tmp_path: Path) -> None:
     """CDJ-350/800 世代向けに、トラック行は RB5 エクスポートの定数を持つ
-    （実測: rkb5_one_track_export.pdb と同じ値）。"""
+    （実測: rkb587_sc01_one_ascii export.pdb と同じ値）。"""
     db = Database.from_file(build_export(tmp_path / "usb"))
     track = db.tracks[0]
     assert track.bitmask == 0x00000700

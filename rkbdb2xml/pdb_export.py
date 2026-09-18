@@ -57,12 +57,20 @@ def create_empty_pdb() -> bytes:
     # 0x0c: next_unused_page, 0x10: unknown, 0x14: sequence.
     # next_unused_page points past the embedded static pages' beyond-EOF
     # empty candidates (41..45); sequence must exceed every data page's
-    # sequence (the embedded pages carry at most 5).  The 0x10 field
-    # varies across real exports (observed 1/4/5); Rekordbox 6.8.7
-    # writes 5, matching the CDJ-3000-verified value in PIONEER.md.
+    # sequence.  The 0x10 field varies across exports but every
+    # Rekordbox 5.8.7 export observed writes 1.
     struct.pack_into("<IIIIII", buf, 0x00, 0, PAGE_SIZE, NUM_TABLES,
-                     46, 5, 0)
-    struct.pack_into("<I", buf, 0x14, 6)
+                     46, 1, 0)
+
+    static = _load_static_pages()
+    # Sequence must exceed every page's sequence.  The embedded static
+    # pages carry their source export's values (history can be large),
+    # so page 0 is set above the embedded maximum.
+    max_seq = max(
+        struct.unpack_from("<I", static, p * PAGE_SIZE + 0x10)[0]
+        for p in range(2 * len(STATIC_TABLES))
+    )
+    struct.pack_into("<I", buf, 0x14, max_seq + 1)
 
     # Table directory at 0x1c.  Populated tables get a beyond-EOF empty
     # candidate like in real exports; empty tables point at their own
@@ -81,7 +89,6 @@ def create_empty_pdb() -> bytes:
         struct.pack_into("<IIII", buf, off, i, empty_candidate,
                          first_page, last_page)
 
-    static = _load_static_pages()
     for i in range(NUM_TABLES):
         if i in STATIC_TABLES:
             dst = (1 + 2 * i) * PAGE_SIZE
