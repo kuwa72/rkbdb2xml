@@ -70,6 +70,7 @@ class RekordboxXMLExporter:
         use_verbose: bool = False,
         playlists: Optional[List[str]] = None,
         playlist_options: Optional[Dict[str, Dict[str, Any]]] = None,
+        pdb_profile: str = "rb5",
     ):
         """
         Initialize the exporter with the path to the Rekordbox database.
@@ -81,8 +82,12 @@ class RekordboxXMLExporter:
             playlists: Selected playlist paths (hierarchical path strings)
             playlist_options: Per-playlist options dict mapping playlist path
                 to {"roman": bool, "bpm": bool, "orderby": str}.
+            pdb_profile: Track-row constant profile for export.pdb
+                ("rb5" for CDJ-350/800-era exports, "rb6" for comparison
+                against Rekordbox 6/7 device exports).
         """
         self._verbose = use_verbose
+        self._pdb_profile = pdb_profile
         # Selected playlist paths from GUI
         self._playlists = playlists
         # Per-playlist options (path -> {roman, bpm, orderby})
@@ -284,7 +289,8 @@ class RekordboxXMLExporter:
         content_map = {str(c.ID): c for c in all_contents}
         if phase_cb is not None:
             phase_cb("データベース書き込み中")
-        PdbExporter(self.db, verbose=self._verbose).build(
+        PdbExporter(self.db, verbose=self._verbose,
+                    pdb_profile=self._pdb_profile).build(
             usb_root=usb_root_path,
             playlist_tree=xml._root_node.children,
             content_map=content_map,
@@ -962,6 +968,7 @@ def export_rekordbox_db_to_device(
     progress_cb: Optional[Callable[[int, int, int, int], None]] = None,
     phase_cb: Optional[Callable[[str], None]] = None,
     cancel_event: Optional[threading.Event] = None,
+    pdb_profile: str = "rb5",
 ) -> None:
     """
     Export a Rekordbox database to a CDJ-compatible USB device library.
@@ -978,6 +985,7 @@ def export_rekordbox_db_to_device(
             total_bytes)`` reported per copied track
         phase_cb: Optional callback receiving the current phase name
         cancel_event: Optional ``threading.Event``; cancels the export.
+        pdb_profile: Track-row constant profile ("rb5" / "rb6").
     """
     exporter = RekordboxXMLExporter(
         db_path,
@@ -985,6 +993,7 @@ def export_rekordbox_db_to_device(
         use_verbose=verbose,
         playlists=playlists,
         playlist_options=playlist_options,
+        pdb_profile=pdb_profile,
     )
     try:
         exporter.generate_device_export(
