@@ -1,6 +1,7 @@
 """Rekordbox 6.8.0 全シナリオ fixture の構造検証。"""
 
 import os
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -45,6 +46,40 @@ def _entry_summaries(database: Database) -> dict[str, list[tuple[int, str, str]]
             )
         )
     return summaries
+
+
+def _track_signatures(database: Database) -> Counter:
+    def names(rows):
+        return {row.id: row.name for row in rows}
+
+    artists = names(database.artists)
+    albums = names(database.albums)
+    genres = names(database.genres)
+    keys = names(database.keys)
+    labels = names(database.labels)
+    return Counter(
+        (
+            track.title,
+            Path(track.filename).suffix.lower(),
+            artists.get(track.artist_id),
+            albums.get(track.album_id),
+            genres.get(track.genre_id),
+            keys.get(track.key_id),
+            labels.get(track.label_id),
+            track.duration,
+            track.bitrate,
+            track.sample_rate,
+            track.sample_depth,
+            track.file_size,
+            track.tempo,
+            track.rating,
+            track.track_number,
+            track.disc_number,
+            track.year,
+            track.comment,
+        )
+        for track in database.tracks
+    )
 
 
 def test_rb680_all_scenarios_fixture_is_complete() -> None:
@@ -101,6 +136,7 @@ def test_rb680_all_scenarios_db_generation_matches_reference_structure(
     )
 
     assert len(generated.tracks) == len(reference.tracks) == 620
+    assert _track_signatures(generated) == _track_signatures(reference)
     assert len(generated.playlist_tree) == len(reference.playlist_tree) == 113
     assert len(generated.playlist_entries) == len(reference.playlist_entries) == 621
     assert set(_playlist_paths(generated).values()) == set(
