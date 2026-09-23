@@ -11,9 +11,12 @@ Rekordbox 6/7 がインストールされた Windows 環境で実行すること
 特定プレイリストだけ出す場合::
 
     ... --playlists "SCENARIOS/SC05_many_tracks"
+
+Linuxのfixture DBを使う場合は `RB6_DB_KEY` または `--db-key` を指定できる。
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -27,6 +30,8 @@ def main() -> None:
     p.add_argument("output", help="USB ツリーの出力先ルート")
     p.add_argument("--db", default=None,
                    help="master.db のパス（省略時は自動検出）")
+    p.add_argument("--db-key", default=os.environ.get("RB6_DB_KEY"),
+                   help="DB の復号キー（未指定時は RB6_DB_KEY / 自動取得）")
     p.add_argument("--profile", default="rb5", choices=("rb5", "rb6"),
                    help="export.pdb のトラック行プロファイル")
     p.add_argument("--playlists", nargs="*", default=None,
@@ -36,6 +41,7 @@ def main() -> None:
     export_rekordbox_db_to_device(
         args.db,
         args.output,
+        db_key=args.db_key,
         verbose=True,
         playlists=args.playlists,
         pdb_profile=args.profile,

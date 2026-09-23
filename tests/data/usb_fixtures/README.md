@@ -3,15 +3,15 @@
 実機 Rekordbox が USB メモリに書き出した `PIONEER/` ツリーの実サンプル集。
 `PdbExporter`（rkbdb2xml/pdb_export.py）の出力と突き合わせるための
 正解データとして使う。合成データではなく、すべて Rekordbox 本体が
-生成したファイル。
+生成したファイル。RB5.8.7 と RB6.8.0 の世代ごとに分離して扱う。
 
 ## 生成環境
 
 | 項目 | 値 |
 |---|---|
-| Rekordbox | 5.8.7（`C:\Program Files\Pioneer\rekordbox 5.8.7`） |
+| Rekordbox | 5.8.7（`C:\Program Files\Pioneer\rekordbox 5.8.7`）および 6.8.0（`rkb680_*` 系） |
 | 出力先 | 実 USB メモリ（FAT32、KIOXIA TransMemory） |
-| 入力 | `scripts/gen_fixture_input.py` が生成した音声 + rekordbox XML（`tests/data/fixture_input/` に保存済み） |
+| 入力 | RB5: `scripts/gen_fixture_input.py` の音声 + rekordbox XML。RB6: `tests/data/rb680_database/master.db` |
 | 回収 | `scripts/capture_usb_fixture.py /mnt/f <name>` |
 
 生成手順の概要:
@@ -30,6 +30,25 @@
 なお Rekordbox は起動中デバイスの export.pdb をロックするため、
 シナリオ間のリセットは Rekordbox 側のデバイスビューで
 「フォルダを削除」する方式を取った。
+
+## Rekordbox 6.8.0 fixture
+
+RB6 の主検証は、次の実データを使う。
+
+- 入力DB: `tests/data/rb680_database/master.db`（`datafile.edb`、
+  `masterPlaylists6.xml` と同梱）
+- 参照出力: `rkb680_sc01_one_ascii/`（1曲）
+- 静的ページ: `rkbdb2xml/data/pdb_static_rb6.bin` は
+  `rkb680_sc01_one_ascii` のテーブル 6, 16, 17, 18, 19 から抽出したもの
+- 設定ファイル: `rkbdb2xml/data/*_rb6.DAT` は同出力の
+  `DEVSETTING.DAT` / `MYSETTING*.DAT` / `DJMMYSETTING.DAT` から抽出したもの
+- 比較テスト: `tests/test_rb6_binary_fixture.py`
+- DB E2E: `RB6_DB_KEY` を設定して同じテストを実行すると、暗号化
+  `master.db` からの USB 生成も検証する（キー未設定時は skip）
+
+RB5 の `rkb587_*` は旧世代／旧CDJ向けのlegacy fixtureであり、RB6の
+正解比較には混ぜない。RB6の実DBからUSBを生成するWindows E2Eは、
+入力DBと `pdb_profile="rb6"` を固定して別途実行する。
 
 ## 各フィクスチャの構成
 
@@ -70,6 +89,7 @@
 | `rkb587_sc11_artwork` | 4 | アートワーク付き（jpg/png）+ なし。`PIONEER/Artwork/` に実画像あり |
 | `rkb587_sc12_misc` | 3 | 空プレイリスト・同一トラック重複参照（playlist entries=4/track=3）・アーティスト空 |
 | `rkb587_all_scenarios` | 621 | 上記全シナリオ + トップレベル単独 SC01 プレイリスト + 空の「無題のリスト」×3 を一括エクスポートしたもの。最大規模 |
+| `rkb680_sc01_one_ascii` | 1 | Rekordbox 6.8.0 の `master.db` から作成した RB6 主検証用出力 |
 
 シナリオ → プレイリスト名の対応は `scenarios.json` を参照
 （`gen_fixture_input.py` が出力したものと同一）。
@@ -86,6 +106,21 @@ print(walk_pdb('tests/data/usb_fixtures/rkb587_sc05_many_tracks/PIONEER/rekordbo
 ```
 
 テスト側は `tests/test_export_validation.py` の `walk_pdb()` を再利用する。
+実DBから生成した USB 全体は、手動確認や次のスクリプトでも比較できる。
+
+
+```bash
+python scripts/compare_usb_exports.py <Rekordbox出力> <rkbdb2xml出力>
+```
+
+### 既知の差分
+
+- `Contents/` は Rekordbox の `Artist/Album/元ファイル名` ではなく、
+  rkbdb2xml のハッシュ名配置になる
+- `djprofile.nxs` / `exportExt.pdb` / Artwork は現時点では生成しない
+- 単一プレイリスト出力では祖先フォルダを保持する（参照出力はフラット）
+- ANLZ は DB の `share` 実体がない環境ではコピーされない
+
 pyrekordbox による ANLZ パース検証は Rekordbox インストール環境でのみ可能。
 
 ## 注意事項

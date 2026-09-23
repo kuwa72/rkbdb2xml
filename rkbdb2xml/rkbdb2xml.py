@@ -118,7 +118,7 @@ class RekordboxXMLExporter:
         Connect to the Rekordbox database, handling key download if necessary.
         """
         try:
-            self.db = RekordboxDatabase(db_path, db_key)
+            self.db = RekordboxDatabase(db_path, key=db_key)
         except Exception as e:
             key = self._download_rekordbox_key()
             if key:
@@ -290,7 +290,7 @@ class RekordboxXMLExporter:
         if phase_cb is not None:
             phase_cb("データベース書き込み中")
         PdbExporter(self.db, verbose=self._verbose,
-                    pdb_profile=self._pdb_profile).build(
+                    pdb_profile=getattr(self, "_pdb_profile", "rb5")).build(
             usb_root=usb_root_path,
             playlist_tree=xml._root_node.children,
             content_map=content_map,
