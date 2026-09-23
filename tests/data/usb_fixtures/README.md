@@ -37,7 +37,7 @@ RB6 の主検証は、次の実データを使う。
 
 - 入力DB: `tests/data/rb680_database/master.db`（`datafile.edb`、
   `masterPlaylists6.xml` と同梱）
-- 参照出力: `rkb680_sc01_one_ascii/`（1曲）
+- 参照出力: `rkb680_sc01_one_ascii/`（1曲）、`rkb680_all_scenarios/`（620曲）
 - 静的ページ: `rkbdb2xml/data/pdb_static_rb6.bin` は
   `rkb680_sc01_one_ascii` のテーブル 6, 16, 17, 18, 19 から抽出したもの
 - 設定ファイル: `rkbdb2xml/data/*_rb6.DAT` は同出力の
@@ -90,6 +90,7 @@ RB5 の `rkb587_*` は旧世代／旧CDJ向けのlegacy fixtureであり、RB6�
 | `rkb587_sc12_misc` | 3 | 空プレイリスト・同一トラック重複参照（playlist entries=4/track=3）・アーティスト空 |
 | `rkb587_all_scenarios` | 621 | 上記全シナリオ + トップレベル単独 SC01 プレイリスト + 空の「無題のリスト」×3 を一括エクスポートしたもの。最大規模 |
 | `rkb680_sc01_one_ascii` | 1 | Rekordbox 6.8.0 の `master.db` から作成した RB6 主検証用出力 |
+| `rkb680_all_scenarios` | 620 | Rekordbox 6.8.0 の全シナリオ一括出力。113プレイリストノード、ANLZ 1860ファイル |
 
 シナリオ → プレイリスト名の対応は `scenarios.json` を参照
 （`gen_fixture_input.py` が出力したものと同一）。
