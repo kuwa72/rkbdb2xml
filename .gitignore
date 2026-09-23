@@ -40,10 +40,12 @@ ENV/
 # Project specific
 *.db
 !tests/data/rekordbox_test.db
+!tests/data/rb680_database/master.db
 *.xml
 !rkb_sample.xml
 !tests/data/test_rkb6_export.xml
 !tests/data/fixture_input/rekordbox.xml
+!tests/data/rb680_database/masterPlaylists6.xml
 !**/pom.xml
 
 temp/

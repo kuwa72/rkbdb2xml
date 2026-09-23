@@ -8,7 +8,8 @@ from importlib.resources import files
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-from rekordbox_pdb.edit import PdbEditor
+from rekordbox_pdb import TableType
+from rekordbox_pdb.edit import PdbEditor, encode_string
 
 from . import anlz
 
@@ -19,32 +20,52 @@ NUM_TABLES = 20
 # Tables that always carry rows in a real Rekordbox export, regardless of
 # library content: 6=colors, 16=columns, 17/18=sort config, 19=history
 # sync state.  Players reject the database when these are empty, so the
-# pages from a real export are embedded verbatim (see data/pdb_static.bin).
+# pages from a real export are embedded verbatim (see data/pdb_static*.bin).
 STATIC_TABLES = (6, 16, 17, 18, 19)
-_STATIC_PAGES: Optional[bytes] = None
+_STATIC_PAGE_FILES = {
+    "rb5": "pdb_static.bin",
+    "rb6": "pdb_static_rb6.bin",
+}
+_STATIC_PAGES: Dict[str, bytes] = {}
 
 # Files Rekordbox writes next to export.pdb on every export.  Old players
 # (CDJ-350/800 era) read DEVSETTING/MYSETTING at mount time, so an export
-# created from scratch should carry them.  They are generic blobs captured
-# from a real Rekordbox 5.8.6 export (no user-specific data), and are only
-# written when missing so a player's own settings are never clobbered.
+# created from scratch should carry them.  They are only written when missing
+# so a player's own settings are never clobbered.
 DEVICE_SETTING_FILES = ("DEVSETTING.DAT", "MYSETTING.DAT", "MYSETTING2.DAT")
+_DEVICE_SETTING_SOURCES = {
+    "rb5": {name: name for name in DEVICE_SETTING_FILES},
+    "rb6": {
+        "DEVSETTING.DAT": "DEVSETTING_rb6.DAT",
+        "MYSETTING.DAT": "MYSETTING_rb6.DAT",
+        "MYSETTING2.DAT": "MYSETTING2_rb6.DAT",
+        "DJMMYSETTING.DAT": "DJMMYSETTING_rb6.DAT",
+    },
+}
 
 
-def _load_static_pages() -> bytes:
+def _load_static_pages(pdb_profile: str = "rb5") -> bytes:
     """Return the 10 pages (index+data for tables 6,16-19) of a real export."""
-    global _STATIC_PAGES
-    if _STATIC_PAGES is None:
-        _STATIC_PAGES = (
-            files("rkbdb2xml") / "data" / "pdb_static.bin"
+    try:
+        filename = _STATIC_PAGE_FILES[pdb_profile]
+    except KeyError:
+        raise ValueError(
+            f"unknown pdb profile {pdb_profile!r}; "
+            f"expected one of {sorted(_STATIC_PAGE_FILES)}"
+        ) from None
+    if pdb_profile not in _STATIC_PAGES:
+        _STATIC_PAGES[pdb_profile] = (
+            files("rkbdb2xml") / "data" / filename
         ).read_bytes()
-    return _STATIC_PAGES
+    return _STATIC_PAGES[pdb_profile]
 
 
-def create_empty_pdb() -> bytes:
+def create_empty_pdb(pdb_profile: str = "rb5") -> bytes:
     """Return a minimal valid `export.pdb` that `PdbEditor` can populate.
 
-    Mirrors the layout of a real Rekordbox export: table ``i`` gets its
+    ``pdb_profile`` selects the static pages captured from a real
+    Rekordbox export of that generation. Mirrors the layout of a real
+    Rekordbox export: table ``i`` gets its
     index page at ``1 + 2*i`` and a data-page slot at ``2 + 2*i``.  The
     static tables (6,16-19) are pre-populated with pages captured from a
     real export because players reject the database when they are empty.
@@ -58,11 +79,13 @@ def create_empty_pdb() -> bytes:
     # next_unused_page points past the embedded static pages' beyond-EOF
     # empty candidates (41..45); sequence must exceed every data page's
     # sequence.  The 0x10 field varies across exports but every
-    # Rekordbox 5.8.7 export observed writes 1.
+    # Rekordbox 5.8.7 export observed writes 1. RB6.8.0 reserves page 46
+    # for the playlist-tree empty candidate and starts allocating at 47.
+    next_unused = 47 if pdb_profile == "rb6" else 46
     struct.pack_into("<IIIIII", buf, 0x00, 0, PAGE_SIZE, NUM_TABLES,
-                     46, 1, 0)
+                     next_unused, 1, 0)
 
-    static = _load_static_pages()
+    static = _load_static_pages(pdb_profile)
     # Sequence must exceed every page's sequence.  The embedded static
     # pages carry their source export's values (history can be large),
     # so page 0 is set above the embedded maximum.
@@ -101,7 +124,8 @@ def create_empty_pdb() -> bytes:
         slot_page = 2 + 2 * i
 
         # Real index pages carry sequence=1 and link to their own
-        # empty-candidate slot.
+        # empty-candidate slot. Dynamic data-page sequence is normalized
+        # after the append transaction for fresh RB6 exports.
         struct.pack_into("<IIIIII", buf, page_off, 0, page_index, i,
                          slot_page, 1, 0)
 
@@ -132,6 +156,93 @@ def create_empty_pdb() -> bytes:
 
     # Data slots of empty tables are left zero-filled; PdbEditor will
     # initialise them when rows are first appended.
+    return bytes(buf)
+
+
+def _set_track_string(
+    editor: PdbEditor, track_id: int, slot: int, value: str
+) -> None:
+    """Replace one same-length DeviceSQL string in an appended track row.
+
+    ``PdbEditor`` exposes fixed numeric fields but not the variable track
+    string slots.  RB6 exports in the captured fixture use ``"1"`` for
+    slot 3, while the dependency's generic ``rb6`` profile writes ``"2"``.
+    Both encodings are one byte, so patching the slot does not move any row
+    offsets or page bookkeeping.
+    """
+    encoded = encode_string(value)
+    for track, location in zip(
+        editor.db.tracks, editor.db.row_locations(TableType.TRACKS)
+    ):
+        if track.id != track_id:
+            continue
+        offset = struct.unpack_from(
+            "<H", editor._buf, location + 0x5E + slot * 2
+        )[0]
+        start = location + offset
+        current = bytes(editor._buf[start:start + len(encoded)])
+        if len(encoded) != len(current):
+            raise ValueError(
+                f"track string slot {slot} changed length: "
+                f"{len(current)} -> {len(encoded)}"
+            )
+        editor._buf[start:start + len(encoded)] = encoded
+        editor._db = None
+        return
+    raise LookupError(f"no track with id {track_id}")
+
+
+# Page layout of the fresh, one-track RB6.8.0 export used as the binary
+# canary.  Larger libraries have history-dependent sequence numbers and
+# must be compared separately; do not apply this table to them.
+_RB6_MINIMAL_LAYOUT = {
+    0: (2, 51, 11),   # tracks
+    1: (4, 48, 8),    # genres
+    2: (6, 47, 7),    # artists
+    3: (8, 49, 9),    # albums
+    5: (12, 50, 10),  # keys
+    7: (16, 46, 6),   # playlist tree
+    8: (18, 52, 12),  # playlist entries
+}
+
+
+def _normalize_rb6_minimal_layout(editor: PdbEditor, data: bytes) -> bytes:
+    """Apply the observed fresh-RB6 page metadata to the one-track canary.
+
+    ``PdbEditor`` allocates an empty file transactionally and therefore
+    starts at sequence 2.  Rekordbox's fresh RB6 export uses the stable
+    table sequence values and page candidates below.  The shape guard keeps
+    this deliberately narrow; multi-track/history fixtures are not rewritten.
+    """
+    if len(data) != 41 * PAGE_SIZE:
+        return data
+    if not (
+        len(editor.db.tracks) == 1
+        and len(editor.db.artists) == 1
+        and len(editor.db.albums) == 1
+        and len(editor.db.genres) == 1
+        and len(editor.db.keys) == 1
+        and len(editor.db.playlist_tree) == 1
+        and len(editor.db.playlist_entries) == 1
+    ):
+        return data
+
+    buf = bytearray(data)
+    for table, (page, empty_candidate, sequence) in _RB6_MINIMAL_LAYOUT.items():
+        page_offset = page * PAGE_SIZE
+        if struct.unpack_from("<I", buf, page_offset + 0x08)[0] != table:
+            return data
+        if buf[page_offset + 0x1B] == 0x64:
+            return data
+
+        struct.pack_into("<I", buf, 0x1C + table * 16 + 0x04,
+                         empty_candidate)
+        struct.pack_into("<I", buf, page_offset + 0x0C, empty_candidate)
+        struct.pack_into("<I", buf, page_offset + 0x10, sequence)
+        struct.pack_into("<H", buf, page_offset + 0x20, 1)
+        struct.pack_into("<H", buf, page_offset + 0x22, 0)
+
+    struct.pack_into("<I", buf, 0x0C, 53)
     return bytes(buf)
 
 
@@ -187,6 +298,33 @@ class PdbExporter:
     def verbose(self, message: str) -> None:
         if self._verbose:
             print(message)
+
+    def _prime_rb6_lookups(
+        self, editor: PdbEditor, content_map: Dict[str, Any]
+    ) -> None:
+        """Pre-create RB6 lookup rows in Rekordbox's observed order.
+
+        The generic editor otherwise creates artist → album → genre while
+        the captured RB6 export allocates artist → genre → album. Priming
+        the unique lookup rows before track insertion keeps page allocation
+        and table empty-candidate ordering aligned with that export.
+        """
+        for content in content_map.values():
+            artist = self._get_first(content, "ArtistName", "Artist")
+            genre = self._get_first(content, "GenreName", "Genre")
+            album = self._get_first(content, "AlbumName", "Album")
+            key = self._get_first(content, "KeyName", "Key")
+            label = self._get_first(content, "LabelName", "Label")
+
+            artist_id = editor.get_or_create_artist(artist) if artist else 0
+            if genre:
+                editor.get_or_create_genre(genre)
+            if album:
+                editor.get_or_create_album(album, artist_id)
+            if key:
+                editor.get_or_create_key(key)
+            if label:
+                editor.get_or_create_label(label)
 
     def build(
         self,
@@ -245,7 +383,23 @@ class PdbExporter:
                 )
                 self._roman_converter = None
 
-        ed = PdbEditor(create_empty_pdb())
+        ed = PdbEditor(create_empty_pdb(self._pdb_profile))
+        if self._pdb_profile == "rb6":
+            selected_ids: List[str] = []
+
+            def collect_content_ids(node: DevicePdbNode) -> None:
+                selected_ids.extend(node.tracks)
+                for child in node.children:
+                    collect_content_ids(child)
+
+            for root in playlist_tree:
+                collect_content_ids(root)
+            selected_content_map = {
+                content_id: content_map[content_id]
+                for content_id in dict.fromkeys(selected_ids)
+                if content_id in content_map
+            }
+            self._prime_rb6_lookups(ed, selected_content_map)
 
         track_id_map: Dict[str, int] = {}
         track_to_usb: Dict[int, str] = {}
@@ -305,6 +459,8 @@ class PdbExporter:
                             self.verbose(f"[WARN] {msg}")
                             errors.append(msg)
                             continue
+                        if self._pdb_profile == "rb6":
+                            _set_track_string(ed, pdb_track_id, 3, "1")
                         track_id_map[content_id] = pdb_track_id
                         track_to_usb[pdb_track_id] = usb_path
 
@@ -344,7 +500,12 @@ class PdbExporter:
         # 原子的書き込み: 一時ファイルに保存し、成功時のみ rename する。
         # 未完成の export.pdb が USB 上に現れることはない。
         try:
-            ed.save(tmp_path)
+            if self._pdb_profile == "rb6":
+                pdb_data = ed.to_bytes()
+                pdb_data = _normalize_rb6_minimal_layout(ed, pdb_data)
+                tmp_path.write_bytes(pdb_data)
+            else:
+                ed.save(tmp_path)
             os.replace(tmp_path, pdb_path)
         except Exception:
             try:
@@ -361,13 +522,14 @@ class PdbExporter:
         # Rekordbox 純正のエクスポートが置く設定ファイルを補完する。
         # 既存のものはプレイヤー/Rekordbox が管理する値なので上書きしない。
         pioneer_dir = usb_root / "PIONEER"
-        for name in DEVICE_SETTING_FILES:
+        setting_sources = _DEVICE_SETTING_SOURCES[self._pdb_profile]
+        for name, source_name in setting_sources.items():
             dst = pioneer_dir / name
             if dst.exists():
                 continue
             try:
                 dst.write_bytes(
-                    (files("rkbdb2xml") / "data" / name).read_bytes()
+                    (files("rkbdb2xml") / "data" / source_name).read_bytes()
                 )
             except Exception as e:
                 self.verbose(f"[WARN] {name} の書き込みに失敗: {e}")

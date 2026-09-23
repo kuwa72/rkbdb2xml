@@ -7,6 +7,10 @@ Rekordbox のバージョンを差し替える際にこのスクリプトで再�
 使い方::
 
     python scripts/extract_pdb_static.py <実機 export.pdb> [出力先]
+
+    python scripts/extract_pdb_static.py \
+        tests/data/usb_fixtures/rkb680_sc01_one_ascii/PIONEER/rekordbox/export.pdb \
+        rkbdb2xml/data/pdb_static_rb6.bin
 """
 
 import struct

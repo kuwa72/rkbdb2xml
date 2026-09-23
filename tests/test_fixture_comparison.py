@@ -36,9 +36,12 @@ FIXTURES_DIR = DATA_DIR / "usb_fixtures"
 INPUT_XML = DATA_DIR / "fixture_input" / "rekordbox.xml"
 SCENARIOS_JSON = FIXTURES_DIR / "scenarios.json"
 
+# このテストは RB5.8.7 fixture との比較専用。RB6 fixture は
+# test_rb6_binary_fixture.py 側で同じ入力・出力世代を固定して扱う。
 SCENARIO_DIRS = sorted(
     p for p in FIXTURES_DIR.iterdir()
-    if p.is_dir() and p.name != "rkb587_empty"
+    if p.is_dir() and p.name.startswith("rkb587_")
+    and p.name != "rkb587_empty"
 )
 
 # XML Colour(RGB) → colors テーブルの color_id。実フィクスチャの
