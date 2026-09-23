@@ -41,18 +41,49 @@ except Exception:
 
 
 def playlist_tracks(db, playlist, orderby: str = "default") -> List[Any]:
-    """Return the tracks of a playlist, optionally ordered by BPM.
+    """Return playlist tracks in Rekordbox's stored order, optionally by BPM.
 
-    ``Rekordbox6Database.get_playlist_contents()`` always yields ``DjmdContent``
-    rows (never ``DjmdSongPlaylist``), so callers can rely on ``track.ID`` --
-    a string in Rekordbox 6 -- instead of probing for other attributes.
+    ``get_playlist_contents()`` is an ID membership query and does not define
+    the order of regular playlist rows.  For a regular playlist, read
+    ``DjmdSongPlaylist.TrackNo`` explicitly and resolve each ContentID; this
+    also preserves duplicate references.  Smart playlists and older/fake DB
+    adapters fall back to ``get_playlist_contents()``.
 
     Args:
         db: An open ``Rekordbox6Database``
         playlist: A ``DjmdPlaylist`` or a playlist ID. Must not be a folder.
         orderby: ``"bpm"`` to sort by BPM, anything else keeps playlist order
     """
-    entries = db.get_playlist_contents(playlist).all()
+    entries = None
+    is_smart = bool(getattr(playlist, "is_smart_playlist", False))
+    if not is_smart and hasattr(db, "get_playlist_songs"):
+        playlist_id = getattr(playlist, "ID", playlist)
+        try:
+            song_rows = db.get_playlist_songs(
+                PlaylistID=playlist_id
+            ).all()
+            content_by_id = {
+                str(content.ID): content
+                for content in db.get_content().all()
+            }
+            ordered = sorted(
+                song_rows,
+                key=lambda row: (
+                    int(getattr(row, "TrackNo", 0) or 0),
+                    str(getattr(row, "ID", "")),
+                ),
+            )
+            entries = [
+                content_by_id[str(row.ContentID)]
+                for row in ordered
+                if str(row.ContentID) in content_by_id
+            ]
+        except (AttributeError, TypeError, ValueError):
+            # Keep compatibility with small test doubles and older adapters.
+            entries = None
+
+    if entries is None:
+        entries = db.get_playlist_contents(playlist).all()
     if orderby == "bpm":
         entries = sorted(entries, key=lambda entry: entry.BPM or 0)
     return entries
