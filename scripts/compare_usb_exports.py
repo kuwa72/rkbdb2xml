@@ -86,6 +86,38 @@ def tree_sig(node, children_map):
     )
 
 
+def raw_pdb_diff(ref_pdb: Path, gen_pdb: Path) -> dict[str, int]:
+    """Return page/byte counts for a raw ``export.pdb`` comparison."""
+    ref = ref_pdb.read_bytes()
+    gen = gen_pdb.read_bytes()
+    page_size = 4096
+    ref_pages = len(ref) // page_size
+    gen_pages = len(gen) // page_size
+    common_pages = min(ref_pages, gen_pages)
+    differing_pages = 0
+    differing_bytes = 0
+    differing_header_pages = 0
+    for page in range(common_pages):
+        ref_page = ref[page * page_size:(page + 1) * page_size]
+        gen_page = gen[page * page_size:(page + 1) * page_size]
+        count = sum(a != b for a, b in zip(ref_page, gen_page))
+        if count:
+            differing_pages += 1
+            differing_bytes += count
+        if ref_page[:0x28] != gen_page[:0x28]:
+            differing_header_pages += 1
+    return {
+        "ref_bytes": len(ref),
+        "gen_bytes": len(gen),
+        "ref_pages": ref_pages,
+        "gen_pages": gen_pages,
+        "common_pages": common_pages,
+        "differing_pages": differing_pages,
+        "differing_header_pages": differing_header_pages,
+        "differing_bytes": differing_bytes,
+    }
+
+
 def compare_pdb(ref_root: Path, gen_root: Path) -> None:
     ref_pdb = ref_root / "PIONEER" / "rekordbox" / "export.pdb"
     gen_pdb = gen_root / "PIONEER" / "rekordbox" / "export.pdb"
@@ -96,6 +128,14 @@ def compare_pdb(ref_root: Path, gen_root: Path) -> None:
 
     ref = Database.from_file(ref_pdb)
     gen = Database.from_file(gen_pdb)
+    raw = raw_pdb_diff(ref_pdb, gen_pdb)
+    print(
+        "[INFO] raw PDB: "
+        f"ref_pages={raw['ref_pages']} gen_pages={raw['gen_pages']} "
+        f"diff_pages={raw['differing_pages']} "
+        f"diff_header_pages={raw['differing_header_pages']} "
+        f"diff_bytes={raw['differing_bytes']}"
+    )
 
     # --- tracks ---------------------------------------------------------
     ref_sigs = Counter(track_sig(t, ref) for t in ref.tracks)
