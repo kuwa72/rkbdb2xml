@@ -31,6 +31,22 @@ def _playlist_paths(database: Database) -> dict[int, str]:
     return paths
 
 
+def _tree_signature(database: Database) -> tuple:
+    children: dict[int, list] = {}
+    for node in database.playlist_tree:
+        children.setdefault(node.parent_id, []).append(node)
+
+    def visit(node):
+        return (
+            node.name,
+            node.is_folder,
+            node.sort_order,
+            tuple(visit(child) for child in children.get(node.id, [])),
+        )
+
+    return tuple(visit(node) for node in children.get(0, []))
+
+
 def _entry_summaries(database: Database) -> dict[str, list[tuple[int, str, str]]]:
     paths = _playlist_paths(database)
     tracks = {track.id: track for track in database.tracks}
@@ -139,9 +155,7 @@ def test_rb680_all_scenarios_db_generation_matches_reference_structure(
     assert _track_signatures(generated) == _track_signatures(reference)
     assert len(generated.playlist_tree) == len(reference.playlist_tree) == 113
     assert len(generated.playlist_entries) == len(reference.playlist_entries) == 621
-    assert set(_playlist_paths(generated).values()) == set(
-        _playlist_paths(reference).values()
-    )
+    assert _tree_signature(generated) == _tree_signature(reference)
     assert _entry_summaries(generated) == _entry_summaries(reference)
     assert sum(
         path.is_file() for path in (usb_root / "Contents").rglob("*")

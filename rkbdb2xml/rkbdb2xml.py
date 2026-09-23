@@ -402,7 +402,12 @@ class RekordboxXMLExporter:
         for pl in all_playlists:
             parent_map.setdefault(pl.ParentID, []).append(pl)
         for children in parent_map.values():
-            children.sort(key=lambda x: x.Name)
+            children.sort(
+                key=lambda x: (
+                    int(getattr(x, "Seq", 0) or 0),
+                    str(getattr(x, "Name", "")),
+                )
+            )
 
         id_map = {pl.ID: pl for pl in all_playlists}
         root_parents = [pid for pid in parent_map if pid not in id_map]
