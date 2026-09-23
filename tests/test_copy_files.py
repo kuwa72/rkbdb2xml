@@ -20,7 +20,11 @@ from mutagen.id3 import ID3, TIT2
 from mutagen.mp4 import MP4
 
 from rkbdb2xml import rkbdb2xml
-from rkbdb2xml.rkbdb2xml import RekordboxXMLExporter
+from rkbdb2xml.rkbdb2xml import (
+    RekordboxXMLExporter,
+    _disambiguate_anlz_destinations,
+)
+from rkbdb2xml.anlz import anlz_dir
 
 M4A_FIXTURE = Path(__file__).parent / "data" / "test_audio.m4a"
 
@@ -117,6 +121,24 @@ def dest_for(export_dir: Path, src: Path) -> Path:
 
     md5 = hashlib.md5(str(src).encode("utf-8")).hexdigest()
     return export_dir / f"{md5}{src.suffix}"
+
+
+def test_anlz_hash_collisions_get_distinct_destinations(tmp_path):
+    first = "dbf4211b99d30bf16ffad8c56b83bcd3.mp3"
+    second = "209b34afcad1f41e84a2d8e84dfc388f.mp3"
+    jobs = [
+        ("first", Path("first.mp3"), tmp_path / first, "loc1", "1", object()),
+        ("second", Path("second.mp3"), tmp_path / second, "loc2", "2", object()),
+    ]
+
+    result = _disambiguate_anlz_destinations(jobs)
+    directories = {
+        anlz_dir(f"/Contents/{job[2].name}") for job in result
+    }
+
+    assert len(directories) == 2
+    assert result[0][2].name == first
+    assert result[1][2].name == f"209b34afcad1f41e84a2d8e84dfc388f-1.mp3"
 
 
 # ----- dest への open は 1 回だけ・書き込みモードは 1 ストリーム -------------

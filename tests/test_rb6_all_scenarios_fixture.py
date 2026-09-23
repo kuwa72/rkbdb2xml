@@ -1,12 +1,14 @@
 """Rekordbox 6.8.0 全シナリオ fixture の構造検証。"""
 
 import os
+import shutil
 from collections import Counter
 from pathlib import Path
 
 import pytest
 from rekordbox_pdb import Database
 
+from rkbdb2xml.anlz import anlz_dir, existing_anlz_matches
 from rkbdb2xml.rkbdb2xml import RekordboxXMLExporter
 
 
@@ -128,6 +130,14 @@ def test_rb680_all_scenarios_db_generation_matches_reference_structure(
         for path in (FIXTURE_ROOT / "Contents").rglob("*")
         if path.is_file()
     }
+    reference = Database.from_file(
+        FIXTURE_ROOT / "PIONEER" / "rekordbox" / "export.pdb"
+    )
+    reference_analyze_paths = {
+        track.filename: track.analyze_path
+        for track in reference.tracks
+        if track.analyze_path
+    }
     exporter = RekordboxXMLExporter(
         str(DB_PATH),
         db_key=key,
@@ -135,10 +145,17 @@ def test_rb680_all_scenarios_db_generation_matches_reference_structure(
         pdb_profile="rb6",
     )
     try:
+        share_root = tmp_path / "share"
+        shutil.copytree(
+            FIXTURE_ROOT / "PIONEER" / "USBANLZ",
+            share_root / "PIONEER" / "USBANLZ",
+        )
+        exporter.db._share_dir = share_root
         for content in exporter.db.get_content().all():
             source_name = Path(str(content.FolderPath)).name
             if source_name in source_by_name:
                 content.FolderPath = str(source_by_name[source_name])
+                content.AnalysisDataPath = reference_analyze_paths[source_name]
         usb_root = tmp_path / "usb"
         exporter.generate_device_export(str(usb_root))
     finally:
@@ -147,10 +164,6 @@ def test_rb680_all_scenarios_db_generation_matches_reference_structure(
     generated = Database.from_file(
         usb_root / "PIONEER" / "rekordbox" / "export.pdb"
     )
-    reference = Database.from_file(
-        FIXTURE_ROOT / "PIONEER" / "rekordbox" / "export.pdb"
-    )
-
     assert len(generated.tracks) == len(reference.tracks) == 620
     assert _track_signatures(generated) == _track_signatures(reference)
     assert len(generated.playlist_tree) == len(reference.playlist_tree) == 113
@@ -160,3 +173,9 @@ def test_rb680_all_scenarios_db_generation_matches_reference_structure(
     assert sum(
         path.is_file() for path in (usb_root / "Contents").rglob("*")
     ) == 620
+    anlz_root = usb_root / "PIONEER" / "USBANLZ"
+    assert sum(path.is_file() for path in anlz_root.rglob("*")) == 1860
+    for track in generated.tracks:
+        dat_path = anlz_root / anlz_dir(track.file_path) / "ANLZ0000.DAT"
+        assert dat_path.is_file(), track.file_path
+        assert existing_anlz_matches(dat_path, track.file_path), track.file_path

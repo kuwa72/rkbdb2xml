@@ -30,6 +30,32 @@ DEFAULT_XML_FILENAME = "rekordbox.xml"
 _COPY_CHUNK = 16 * 1024 * 1024
 _TAGGED_EXTS = (".mp3", ".m4a", ".mp4")
 
+
+def _disambiguate_anlz_destinations(jobs: List[tuple]) -> List[tuple]:
+    """Avoid ANLZ directory collisions in the flat hashed Contents layout."""
+    from .anlz import anlz_dir
+
+    used_dirs = set()
+    result = []
+    for job in jobs:
+        original_dest = job[2]
+        dest = original_dest
+        suffix = 0
+        while True:
+            directory = anlz_dir(f"/Contents/{dest.name}")
+            if directory not in used_dirs:
+                break
+            suffix += 1
+            dest = original_dest.with_name(
+                f"{original_dest.stem}-{suffix}{original_dest.suffix}"
+            )
+        used_dirs.add(directory)
+        if dest == original_dest:
+            result.append(job)
+        else:
+            result.append((*job[:2], dest, *job[3:]))
+    return result
+
 try:
     from romann import RomanConverter
 except Exception:
@@ -810,6 +836,7 @@ class RekordboxXMLExporter:
 
         # ソースの同じフォルダを連続で読む（HDD ソースでの局所性。SSD では無害）
         jobs.sort(key=lambda job: job[0])
+        jobs = _disambiguate_anlz_destinations(jobs)
 
         existing: set = set()
         if export_dir.is_dir():
