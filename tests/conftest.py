@@ -11,12 +11,42 @@ db6 依存モジュールをまとめて skip する。
 """
 
 import os
+from pathlib import Path
 
 import pytest
 
 _TEST_DB = os.path.join(
     os.path.dirname(__file__), "data", "rekordbox_test.db"
 )
+
+
+def load_dotenv(path: Path) -> None:
+    """Load ``KEY=VALUE`` lines from ``path`` into ``os.environ``.
+
+    Used to pick up the repo-local ``.env`` (gitignored) holding
+    ``RB6_DB_KEY`` for local encrypted-DB E2E runs. Existing
+    environment variables are never overridden, so shell exports and
+    CI secrets take precedence. Missing files are a no-op.
+    """
+    try:
+        text = Path(path).read_text()
+    except OSError:
+        return
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        if key:
+            os.environ.setdefault(key, value)
+
+
+# リポジトリ直下の .env（gitignore 済み）からローカル用キーを読む
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 # RekordboxXMLExporter(db_path=TEST_DB_PATH) を直接使うモジュール
 _DB6_MODULES = {
