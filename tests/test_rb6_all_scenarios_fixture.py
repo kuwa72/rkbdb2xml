@@ -117,6 +117,42 @@ def test_rb680_all_scenarios_fixture_is_complete() -> None:
     ) == 1860
 
 
+def test_rb680_all_scenarios_anlz_layout_and_ppth() -> None:
+    """キー不要で全620曲の Contents 相対パス・USBANLZ 配置・PPTH を検証する。
+
+    ANLZ はハッシュ衝突時に実機が ``ANLZ0001`` 等の連番を振るため、
+    照合の基準は ``ANLZ0000.DAT`` 固定ではなく DB の ``analyze_path``。
+    """
+    database = Database.from_file(
+        FIXTURE_ROOT / "PIONEER" / "rekordbox" / "export.pdb"
+    )
+    contents = FIXTURE_ROOT / "Contents"
+    on_disk = {
+        "/Contents/" + path.relative_to(contents).as_posix()
+        for path in contents.rglob("*")
+        if path.is_file()
+    }
+    assert {track.file_path for track in database.tracks} == on_disk
+
+    anlz_root = FIXTURE_ROOT / "PIONEER" / "USBANLZ"
+    checked = 0
+    for track in database.tracks:
+        assert track.analyze_path, track.file_path
+        anlz_file = FIXTURE_ROOT / track.analyze_path.lstrip("/")
+        assert anlz_file.is_file(), track.analyze_path
+        assert track.analyze_path.rsplit("/", 1)[0] == (
+            f"/PIONEER/USBANLZ/{anlz_dir(track.file_path).as_posix()}"
+        ), track.file_path
+        assert existing_anlz_matches(anlz_file, track.file_path), (
+            track.file_path
+        )
+        checked += 1
+    assert checked == 620
+    assert sum(
+        path.is_file() for path in anlz_root.rglob("*")
+    ) == 1860
+
+
 def test_rb680_all_scenarios_db_generation_matches_reference_structure(
     tmp_path: Path,
 ) -> None:
