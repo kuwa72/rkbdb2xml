@@ -71,6 +71,34 @@ def test_playlist_order_is_kept_by_default():
     assert [t.ID for t in tracks] == ["3", "1"]
 
 
+def test_playlist_song_rows_define_order_and_duplicates():
+    class FakeSong:
+        def __init__(self, content_id, track_no):
+            self.ContentID = content_id
+            self.TrackNo = track_no
+
+    class OrderedDatabase(FakeDatabase):
+        def get_playlist_songs(self, **kwargs):
+            assert kwargs == {"PlaylistID": "PL1"}
+            return FakeQuery([
+                FakeSong("2", 1),
+                FakeSong("1", 2),
+                FakeSong("2", 3),
+            ])
+
+        def get_content(self):
+            return FakeQuery([FakeContent("1"), FakeContent("2")])
+
+    db = OrderedDatabase([
+        FakeContent("2"),
+        FakeContent("1"),
+    ])
+
+    tracks = playlist_tracks(db, FakePlaylist())
+
+    assert [track.ID for track in tracks] == ["2", "1", "2"]
+
+
 def test_bpm_ordering_sorts_ascending():
     db = FakeDatabase(
         [FakeContent("a", 14000), FakeContent("b", 9000), FakeContent("c", 12000)]

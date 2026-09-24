@@ -44,7 +44,7 @@ Rekordbox 側の仕様による変換であり差異としてカウントしな�
 - Rating は XML の 0/51/102/153/204/255 ↔ 0〜5 星
 - `Location` は `C:/rkb-fixtures/audio/...` からデバイス上の
   `/Contents/<Artist>/<Album>/<file>` に書き換わる
-- `rkb587_all_scenarios` には XML 外の要素が含まれる
+- 旧RB5 fixture（削除済み）の `rkb587_all_scenarios` には XML 外の要素が含まれていた
   （トップレベルの `SC01 one_ascii` プレイリストと空の「無題のリスト」×3）。
   インポート作業中にコレクション側へ個別に取り込まれたもので、
   この XML には存在しない

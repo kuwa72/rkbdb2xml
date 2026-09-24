@@ -55,11 +55,14 @@ def _fixture_pdb(name: str) -> Path:
 
 
 REAL_EXPORTS = [
-    _fixture_pdb("rkb587_empty"),
-    _fixture_pdb("rkb587_sc01_one_ascii"),
-    _fixture_pdb("rkb587_sc02_japanese"),
-    _fixture_pdb("rkb587_sc05_many_tracks"),
-    _fixture_pdb("rkb587_all_scenarios"),
+    path for path in (
+        _fixture_pdb("rkb587_empty"),
+        _fixture_pdb("rkb587_sc01_one_ascii"),
+        _fixture_pdb("rkb587_sc02_japanese"),
+        _fixture_pdb("rkb587_sc05_many_tracks"),
+        _fixture_pdb("rkb587_all_scenarios"),
+    )
+    if path.is_file()
 ]
 
 # Rekordbox がライブラリ内容に関わらず常に書く静的テーブル
@@ -69,6 +72,11 @@ REAL_EXPORTS = [
 STATIC_TABLE_ROWS = {6: 8, 16: 27, 17: 21, 18: 17, 19: 1}
 
 PAGE_SIZE = 4096
+
+
+def _require_rb5_fixture(path: Path) -> None:
+    if not path.is_file():
+        pytest.skip(f"legacy RB5 fixture removed: {path}")
 
 
 def walk_pdb(path: Path) -> Dict[int, int]:
@@ -207,6 +215,7 @@ def test_generated_pdb_header_invariants(tmp_path: Path) -> None:
 
 def test_generated_pdb_matches_real_export_tables(tmp_path: Path) -> None:
     """実 Rekordbox エクスポートと同じ静的テーブル構成を持つ。"""
+    _require_rb5_fixture(_fixture_pdb("rkb587_sc01_one_ascii"))
     real = walk_pdb(_fixture_pdb("rkb587_sc01_one_ascii"))
     generated = walk_pdb(build_export(tmp_path / "usb"))
     for table in STATIC_TABLE_ROWS:
@@ -251,6 +260,7 @@ def test_real_anlz_parses_with_kaitai_and_pyrekordbox() -> None:
     from pyrekordbox.anlz import AnlzFile
 
     dat = DATA_DIR / "rkb587_anlz.dat"
+    _require_rb5_fixture(dat)
     anlz = RekordboxAnlz(KaitaiStream(BytesIO(dat.read_bytes())))
     assert len(anlz.sections) > 0
     af = AnlzFile.parse_file(str(dat))
@@ -262,6 +272,8 @@ def test_copied_anlz_parses_and_has_usb_path(tmp_path: Path) -> None:
     PPTH が USB 上の楽曲パスを指す。"""
     from pyrekordbox.anlz import AnlzFile
 
+    _require_rb5_fixture(DATA_DIR / "rkb587_anlz.dat")
+    _require_rb5_fixture(DATA_DIR / "rkb587_anlz.ext")
     usb_root = tmp_path / "usb"
     pdb_path = build_export(usb_root, db=FakeDbWithAnlz())
     track = Database.from_file(pdb_path).tracks[0]
@@ -290,6 +302,7 @@ def test_rewrite_anlz_path_real_fixture(tmp_path: Path) -> None:
     """実 ANLZ fixture の PPTH 書き換え結果が pyrekordbox で読める。"""
     from pyrekordbox.anlz import AnlzFile
 
+    _require_rb5_fixture(DATA_DIR / "rkb587_anlz.dat")
     dst = tmp_path / "out.DAT"
     new_path = "/Contents/rewritten_track.mp3"
     assert rewrite_anlz_path(DATA_DIR / "rkb587_anlz.dat", dst, new_path)
@@ -319,6 +332,7 @@ def test_real_ext_structure_and_rewrite(tmp_path: Path) -> None:
     from pyrekordbox.anlz import AnlzFile
 
     ext = DATA_DIR / "rkb587_anlz.ext"
+    _require_rb5_fixture(ext)
     tags = _walk_anlz_tags(ext.read_bytes())
     assert b"PPTH" in tags
     af = AnlzFile.parse_file(str(ext))

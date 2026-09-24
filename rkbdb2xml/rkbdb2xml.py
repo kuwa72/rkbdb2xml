@@ -30,6 +30,32 @@ DEFAULT_XML_FILENAME = "rekordbox.xml"
 _COPY_CHUNK = 16 * 1024 * 1024
 _TAGGED_EXTS = (".mp3", ".m4a", ".mp4")
 
+
+def _disambiguate_anlz_destinations(jobs: List[tuple]) -> List[tuple]:
+    """Avoid ANLZ directory collisions in the flat hashed Contents layout."""
+    from .anlz import anlz_dir
+
+    used_dirs = set()
+    result = []
+    for job in jobs:
+        original_dest = job[2]
+        dest = original_dest
+        suffix = 0
+        while True:
+            directory = anlz_dir(f"/Contents/{dest.name}")
+            if directory not in used_dirs:
+                break
+            suffix += 1
+            dest = original_dest.with_name(
+                f"{original_dest.stem}-{suffix}{original_dest.suffix}"
+            )
+        used_dirs.add(directory)
+        if dest == original_dest:
+            result.append(job)
+        else:
+            result.append((*job[:2], dest, *job[3:]))
+    return result
+
 try:
     from romann import RomanConverter
 except Exception:
@@ -41,18 +67,49 @@ except Exception:
 
 
 def playlist_tracks(db, playlist, orderby: str = "default") -> List[Any]:
-    """Return the tracks of a playlist, optionally ordered by BPM.
+    """Return playlist tracks in Rekordbox's stored order, optionally by BPM.
 
-    ``Rekordbox6Database.get_playlist_contents()`` always yields ``DjmdContent``
-    rows (never ``DjmdSongPlaylist``), so callers can rely on ``track.ID`` --
-    a string in Rekordbox 6 -- instead of probing for other attributes.
+    ``get_playlist_contents()`` is an ID membership query and does not define
+    the order of regular playlist rows.  For a regular playlist, read
+    ``DjmdSongPlaylist.TrackNo`` explicitly and resolve each ContentID; this
+    also preserves duplicate references.  Smart playlists and older/fake DB
+    adapters fall back to ``get_playlist_contents()``.
 
     Args:
         db: An open ``Rekordbox6Database``
         playlist: A ``DjmdPlaylist`` or a playlist ID. Must not be a folder.
         orderby: ``"bpm"`` to sort by BPM, anything else keeps playlist order
     """
-    entries = db.get_playlist_contents(playlist).all()
+    entries = None
+    is_smart = bool(getattr(playlist, "is_smart_playlist", False))
+    if not is_smart and hasattr(db, "get_playlist_songs"):
+        playlist_id = getattr(playlist, "ID", playlist)
+        try:
+            song_rows = db.get_playlist_songs(
+                PlaylistID=playlist_id
+            ).all()
+            content_by_id = {
+                str(content.ID): content
+                for content in db.get_content().all()
+            }
+            ordered = sorted(
+                song_rows,
+                key=lambda row: (
+                    int(getattr(row, "TrackNo", 0) or 0),
+                    str(getattr(row, "ID", "")),
+                ),
+            )
+            entries = [
+                content_by_id[str(row.ContentID)]
+                for row in ordered
+                if str(row.ContentID) in content_by_id
+            ]
+        except (AttributeError, TypeError, ValueError):
+            # Keep compatibility with small test doubles and older adapters.
+            entries = None
+
+    if entries is None:
+        entries = db.get_playlist_contents(playlist).all()
     if orderby == "bpm":
         entries = sorted(entries, key=lambda entry: entry.BPM or 0)
     return entries
@@ -371,7 +428,12 @@ class RekordboxXMLExporter:
         for pl in all_playlists:
             parent_map.setdefault(pl.ParentID, []).append(pl)
         for children in parent_map.values():
-            children.sort(key=lambda x: x.Name)
+            children.sort(
+                key=lambda x: (
+                    int(getattr(x, "Seq", 0) or 0),
+                    str(getattr(x, "Name", "")),
+                )
+            )
 
         id_map = {pl.ID: pl for pl in all_playlists}
         root_parents = [pid for pid in parent_map if pid not in id_map]
@@ -774,6 +836,7 @@ class RekordboxXMLExporter:
 
         # ソースの同じフォルダを連続で読む（HDD ソースでの局所性。SSD では無害）
         jobs.sort(key=lambda job: job[0])
+        jobs = _disambiguate_anlz_destinations(jobs)
 
         existing: set = set()
         if export_dir.is_dir():

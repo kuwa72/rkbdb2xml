@@ -10,6 +10,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       QT_QPA_PLATFORM: offscreen
+      # 暗号化 master.db の全シナリオ E2E 用。未設定なら該当テストは
+      # skip になる（tests/test_rb6_*_fixture.py）。
+      RB6_DB_KEY: ${{ secrets.RB6_DB_KEY }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

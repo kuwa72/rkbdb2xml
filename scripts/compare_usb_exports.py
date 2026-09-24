@@ -16,6 +16,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from rekordbox_pdb import Database  # noqa: E402
 
+from rkbdb2xml.anlz import anlz_dir, existing_anlz_matches  # noqa: E402
+
 SETTINGS_FILES = (
     "DEVSETTING.DAT", "MYSETTING.DAT", "MYSETTING2.DAT",
     "DJMMYSETTING.DAT", "djprofile.nxs",
@@ -30,11 +32,20 @@ KNOWN_ABSENT_REKORDBOX_DIR = ("exportExt.pdb",)
 
 results = []
 
+# known 差分の3分類（Issue #55）。FAIL には数えず [INFO] で分類を付ける。
+KNOWN_CATEGORIES = {
+    "input": "入力由来",
+    "generation": "Rekordbox世代／履歴由来",
+    "unimplemented": "rkbdb2xml未実装",
+}
+
 
 def report(ok: bool, label: str, detail: str = "",
-           known: bool = False) -> None:
-    if known and not ok:
-        print(f"[INFO] {label} -- 既知の差分: {detail}")
+           category: str | None = None) -> None:
+    if category is not None and category not in KNOWN_CATEGORIES:
+        raise ValueError(f"unknown known-diff category: {category!r}")
+    if category and not ok:
+        print(f"[INFO] {KNOWN_CATEGORIES[category]}: {label} -- {detail}")
         return
     results.append(ok)
     mark = "OK " if ok else "FAIL"
@@ -86,6 +97,124 @@ def tree_sig(node, children_map):
     )
 
 
+def _page_row_count(page: bytes) -> int:
+    """Read the 11-bit ``num_rows`` field from a table page header.
+
+    The page header stores 13 bits of ``num_row_offsets`` followed by 11
+    bits of ``num_rows`` in little-endian bit order at offset 0x18 (the
+    same layout the kaitai parser reads). Page 0 is the database header
+    page and must not be passed here.
+    """
+    if len(page) < 0x1B:
+        return 0
+    word = int.from_bytes(page[0x18:0x1B], "little")
+    return (word >> 13) & 0x7FF
+
+
+def raw_pdb_diff(ref_pdb: Path, gen_pdb: Path) -> dict[str, int]:
+    """Return page/byte/row counts for a raw ``export.pdb`` comparison."""
+    ref = ref_pdb.read_bytes()
+    gen = gen_pdb.read_bytes()
+    page_size = 4096
+    ref_pages = len(ref) // page_size
+    gen_pages = len(gen) // page_size
+    common_pages = min(ref_pages, gen_pages)
+    differing_pages = 0
+    differing_bytes = 0
+    differing_header_pages = 0
+    for page in range(common_pages):
+        ref_page = ref[page * page_size:(page + 1) * page_size]
+        gen_page = gen[page * page_size:(page + 1) * page_size]
+        count = sum(a != b for a, b in zip(ref_page, gen_page))
+        if count:
+            differing_pages += 1
+            differing_bytes += count
+        if ref_page[:0x28] != gen_page[:0x28]:
+            differing_header_pages += 1
+    # page 0 is the database header, not a table page
+    ref_rows = sum(
+        _page_row_count(ref[p * page_size:(p + 1) * page_size])
+        for p in range(1, ref_pages)
+    )
+    gen_rows = sum(
+        _page_row_count(gen[p * page_size:(p + 1) * page_size])
+        for p in range(1, gen_pages)
+    )
+    differing_row_pages = sum(
+        _page_row_count(ref[p * page_size:(p + 1) * page_size])
+        != _page_row_count(gen[p * page_size:(p + 1) * page_size])
+        for p in range(1, common_pages)
+    )
+    return {
+        "ref_bytes": len(ref),
+        "gen_bytes": len(gen),
+        "ref_pages": ref_pages,
+        "gen_pages": gen_pages,
+        "common_pages": common_pages,
+        "differing_pages": differing_pages,
+        "differing_header_pages": differing_header_pages,
+        "differing_bytes": differing_bytes,
+        "ref_rows": ref_rows,
+        "gen_rows": gen_rows,
+        "differing_row_pages": differing_row_pages,
+    }
+
+
+def check_paths(root: Path, db, tag: str) -> None:
+    """Contents 相対パス・USBANLZ 配置・PPTH をまとめて検証する。
+
+    1つの USB ルートについて次の4点を順に報告する（Issue #55）。
+
+    1. ``Contents/`` の相対パス集合と DB の ``file_path`` 集合の一致
+    2. ``analyze_path`` が指す ANLZ ファイルの実在
+    3. ``analyze_path`` のディレクトリが ``anlz_dir(file_path)`` の
+       ハッシュと一致すること
+    4. ANLZ の ``PPTH`` が ``file_path`` と一致すること
+
+    照合基準は ``ANLZ0000.DAT`` 固定ではなく DB の ``analyze_path``。
+    実機 Rekordbox はハッシュ衝突時に ``ANLZ0001`` 等の連番を振るため。
+    PPTH は pyrekordbox 無しでも読める ``existing_anlz_matches`` で
+    見るので、CI でも検証が走る。
+    """
+    contents = root / "Contents"
+    on_disk = set()
+    if contents.exists():
+        on_disk = {
+            "/Contents/" + p.relative_to(contents).as_posix()
+            for p in contents.rglob("*")
+            if p.is_file()
+        }
+    declared = {t.file_path for t in db.tracks}
+    report(
+        on_disk == declared,
+        f"{tag} Contents relative paths match DB file_path",
+        f"missing={sorted(declared - on_disk)[:3]} "
+        f"orphan={sorted(on_disk - declared)[:3]}",
+    )
+
+    missing = bad_dir = ppth_bad = 0
+    examples = []
+    for t in db.tracks:
+        if not t.analyze_path:
+            continue
+        expected_dir = f"/PIONEER/USBANLZ/{anlz_dir(t.file_path).as_posix()}"
+        if t.analyze_path.rsplit("/", 1)[0] != expected_dir:
+            bad_dir += 1
+        f = root / t.analyze_path.lstrip("/")
+        if not f.is_file():
+            missing += 1
+            continue
+        if not existing_anlz_matches(f, t.file_path):
+            ppth_bad += 1
+            examples.append(t.analyze_path)
+    report(missing == 0, f"{tag} ANLZ files present",
+           f"missing={missing}")
+    report(bad_dir == 0, f"{tag} USBANLZ dir == hash(file_path)",
+           f"bad={bad_dir}")
+    report(ppth_bad == 0, f"{tag} ANLZ PPTH == track file_path",
+           f"bad={ppth_bad} {examples[:3]}")
+
+
 def compare_pdb(ref_root: Path, gen_root: Path) -> None:
     ref_pdb = ref_root / "PIONEER" / "rekordbox" / "export.pdb"
     gen_pdb = gen_root / "PIONEER" / "rekordbox" / "export.pdb"
@@ -96,6 +225,16 @@ def compare_pdb(ref_root: Path, gen_root: Path) -> None:
 
     ref = Database.from_file(ref_pdb)
     gen = Database.from_file(gen_pdb)
+    raw = raw_pdb_diff(ref_pdb, gen_pdb)
+    print(
+        "[INFO] raw PDB: "
+        f"ref_pages={raw['ref_pages']} gen_pages={raw['gen_pages']} "
+        f"diff_pages={raw['differing_pages']} "
+        f"diff_header_pages={raw['differing_header_pages']} "
+        f"diff_bytes={raw['differing_bytes']} "
+        f"ref_rows={raw['ref_rows']} gen_rows={raw['gen_rows']} "
+        f"diff_row_pages={raw['differing_row_pages']}"
+    )
 
     # --- tracks ---------------------------------------------------------
     ref_sigs = Counter(track_sig(t, ref) for t in ref.tracks)
@@ -141,7 +280,9 @@ def compare_pdb(ref_root: Path, gen_root: Path) -> None:
         ref_tree == gen_tree,
         "playlist tree structure",
         f"ref nodes={len(ref.playlist_tree)} gen nodes={len(gen.playlist_tree)}",
-        known=known_flat,
+        # Rekordbox のプレイリスト単体エクスポートは祖先フォルダを書かず
+        # フラットになる。リーフ集合が一致するなら設計上の既知差分。
+        category="generation" if known_flat else None,
     )
     if ref_tree != gen_tree:
         print(f"    ref: {ref_tree}")
@@ -208,45 +349,12 @@ def compare_pdb(ref_root: Path, gen_root: Path) -> None:
         r = len(getattr(ref, attr, []))
         g = len(getattr(gen, attr, []))
         report(r == g, f"table {attr}", f"ref={r} gen={g}",
-               # アートワーク行・PIONEER/Artwork 画像は未実装
-               # (CDJ-350/800 は表示しない)
-               known=(attr == "artwork"))
+               # アートワーク行は未実装 (CDJ-350/800 は表示しない)
+               category="unimplemented" if attr == "artwork" else None)
 
-    # --- ANLZ --------------------------------------------------------------
-    anlz_ok = anlz_missing = anlz_tag_diff = 0
-    tag_diff_examples = []
-    try:
-        from pyrekordbox.anlz import AnlzFile
-    except Exception:
-        AnlzFile = None
-
-    def check_side(root, db, tag):
-        nonlocal anlz_ok, anlz_missing, anlz_tag_diff
-        for t in db.tracks:
-            if not t.analyze_path:
-                continue
-            rel = t.analyze_path.lstrip("/")
-            f = root / rel
-            if not f.is_file():
-                anlz_missing += 1
-                continue
-            if AnlzFile is not None:
-                af = AnlzFile.parse_file(str(f))
-                if af.get("PPTH") != t.file_path:
-                    anlz_tag_diff += 1
-                    tag_diff_examples.append(
-                        f"{tag}:{f.name} PPTH={af.get('PPTH')!r}")
-                else:
-                    anlz_ok += 1
-            else:
-                anlz_ok += 1
-
-    check_side(ref_root, ref, "ref")
-    check_side(gen_root, gen, "gen")
-    report(anlz_missing == 0, "ANLZ files present",
-           f"missing={anlz_missing}")
-    report(anlz_tag_diff == 0, "ANLZ PPTH == track file_path",
-           f"bad={anlz_tag_diff} {tag_diff_examples[:3]}")
+    # --- Contents / ANLZ の配置と PPTH ------------------------------------
+    check_paths(ref_root, ref, "ref")
+    check_paths(gen_root, gen, "gen")
 
     # USBANLZ file count
     def count_anlz(root):
@@ -283,7 +391,8 @@ def compare_settings(ref_root: Path, gen_root: Path) -> None:
             r.exists() and g.exists(),
             f"PIONEER/{name} presence",
             f"ref={r.exists()} gen={g.exists()}",
-            known=name in KNOWN_ABSENT,
+            # djprofile.nxs は個人情報を含むため意図的に生成しない
+            category="unimplemented" if name in KNOWN_ABSENT else None,
         )
         if r.exists() and g.exists():
             report(
@@ -292,7 +401,9 @@ def compare_settings(ref_root: Path, gen_root: Path) -> None:
                 f"ref={r.stat().st_size}B gen={g.stat().st_size}B",
                 # ユーザー設定値 + Rekordbox バージョン文字列を含むため
                 # インストール毎にバイトが変わる。構造サイズのみ一致前提。
-                known=name != "DJMMYSETTING.DAT",
+                category=(
+                    "generation" if name != "DJMMYSETTING.DAT" else None
+                ),
             )
     # Rekordbox が rekordbox/ 以下に書く付属ファイル
     for name in KNOWN_ABSENT_REKORDBOX_DIR:
@@ -303,14 +414,16 @@ def compare_settings(ref_root: Path, gen_root: Path) -> None:
                 r.exists() and g.exists(),
                 f"PIONEER/rekordbox/{name} presence",
                 f"ref={r.exists()} gen={g.exists()}",
-                known=True,
+                # exportExt.pdb (Device Library Plus) は未実装
+                category="unimplemented",
             )
     # Artwork ディレクトリ (画像行と同じく未実装)
     r = ref_root / "PIONEER" / "Artwork"
     g = gen_root / "PIONEER" / "Artwork"
     if r.exists() or g.exists():
         report(r.exists() and g.exists(), "PIONEER/Artwork presence",
-               f"ref={r.exists()} gen={g.exists()}", known=True)
+               f"ref={r.exists()} gen={g.exists()}",
+               category="unimplemented")
 
 
 def main() -> None:
