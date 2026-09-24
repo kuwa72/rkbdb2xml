@@ -192,6 +192,22 @@ def _set_track_string(
     raise LookupError(f"no track with id {track_id}")
 
 
+def _set_playlist_sort_order(
+    editor: PdbEditor, node_id: int, sort_order: int
+) -> None:
+    """Set one playlist tree row's sort order in the generated buffer."""
+    for node, location in zip(
+        editor.db.playlist_tree,
+        editor.db.row_locations(TableType.PLAYLIST_TREE),
+    ):
+        if node.id != node_id:
+            continue
+        struct.pack_into("<I", editor._buf, location + 0x08, sort_order)
+        editor._db = None
+        return
+    raise LookupError(f"no playlist node with id {node_id}")
+
+
 # Page layout of the fresh, one-track RB6.8.0 export used as the binary
 # canary.  Larger libraries have history-dependent sequence numbers and
 # must be compared separately; do not apply this table to them.
@@ -405,7 +421,11 @@ class PdbExporter:
         track_to_usb: Dict[int, str] = {}
         errors: List[str] = []
 
-        def process_node(node: DevicePdbNode, parent_pdb_id: int = 0) -> int:
+        def process_node(
+            node: DevicePdbNode,
+            parent_pdb_id: int = 0,
+            sort_order: int = 0,
+        ) -> int:
             try:
                 pdb_node_id = ed.create_playlist(
                     node.name, parent_pdb_id, node.is_folder
@@ -415,9 +435,11 @@ class PdbExporter:
                 errors.append(msg)
                 self.verbose(f"[WARN] {msg}")
                 return 0
+            if self._pdb_profile == "rb6":
+                _set_playlist_sort_order(ed, pdb_node_id, sort_order)
             if node.is_folder:
-                for child in node.children:
-                    process_node(child, pdb_node_id)
+                for child_index, child in enumerate(node.children):
+                    process_node(child, pdb_node_id, child_index * 2)
             else:
                 self.verbose(
                     f"[PDB] プレイリスト書き込み: {node.name} "
@@ -482,11 +504,11 @@ class PdbExporter:
                             errors.append(msg)
             return pdb_node_id
 
-        for root in playlist_tree:
+        for root_index, root in enumerate(playlist_tree):
             if cancel_event is not None and cancel_event.is_set():
                 self.verbose("キャンセルされました: PDB 書き込みを中断しました")
                 return None
-            process_node(root, 0)
+            process_node(root, 0, root_index * 2)
 
         if not track_id_map and errors:
             raise RuntimeError(
